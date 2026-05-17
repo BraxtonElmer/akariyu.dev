@@ -1,0 +1,45 @@
+name: akariyu
+description: "Your dev server, in your pocket."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.11.3
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # State management
+  flutter_riverpod: ^2.5.1
+
+  # SSH / SFTP
+  dartssh2: ^2.13.0
+
+  # Secure storage
+  flutter_secure_storage: ^9.2.4
+
+  # Biometric auth
+  local_auth: ^2.3.0
+
+  # Routing
+  go_router: ^14.6.2
+
+  # Fonts
+  google_fonts: ^6.2.1
+
+  # Utilities
+  uuid: ^4.5.1
+  intl: ^0.20.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+  mocktail: ^1.0.4
+
+flutter:
+  uses-material-design: true

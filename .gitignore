@@ -1,0 +1,62 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/launch.json
+.history/
+
+# Logs / crash reports
+*.log
+flutter_*.log
+
+# Secrets — never commit
+*.pem
+*.key
+*.p12
+*.keystore
+*.jks
+secrets/
+.env
+.env.*
+
+# Flutter / Dart build outputs (Flutter subproject also has its own .gitignore)
+**/build/
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.last_build_id
+**/.pub/
+**/.pub-cache/
+**/coverage/
+**/doc/api/
+**/app.*.symbols
+**/app.*.map.json
+
+# Android
+**/android/.gradle/
+**/android/local.properties
+**/android/key.properties
+**/android/captures/
+**/android/gradlew
+**/android/gradlew.bat
+**/android/app/release/
+**/android/app/profile/
+**/android/app/debug/
+
+# iOS
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/flutter_export_environment.sh
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/App.framework
+**/ios/Flutter/ephemeral/
+**/ios/Runner/GeneratedPluginRegistrant.*
+**/Pods/
