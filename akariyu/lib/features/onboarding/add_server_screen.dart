@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/providers.dart';
 import '../../core/ssh/ssh_models.dart';
 import '../../core/ssh/ssh_service.dart';
+import '../../dev_credentials.dart';
 import '../../shared/widgets/akariyu_button.dart';
 import '../../shared/widgets/akariyu_text_field.dart';
 import '../../theme/colors.dart';
@@ -54,9 +55,27 @@ class _AddServerScreenState extends ConsumerState<AddServerScreen> {
     if (widget.isEditing) {
       _loading = true;
       WidgetsBinding.instance.addPostFrameCallback((_) => _loadExisting());
+    } else if (DevCredentials.enabled) {
+      _applyDevPrefill();
     } else {
       _name.text = 'dev-server';
     }
+  }
+
+  void _applyDevPrefill() {
+    // Trim whitespace around the raw triple-quoted PEM so the leading /
+    // trailing newlines in the source don't end up in the actual key.
+    final key = DevCredentials.privateKey.trim();
+    _name.text = DevCredentials.name;
+    _host.text = DevCredentials.host;
+    _port.text = DevCredentials.port.toString();
+    _user.text = DevCredentials.username;
+    _authMode = DevCredentials.authMode;
+    _key.text = key;
+    _passphrase.text = DevCredentials.passphrase;
+    _password.text = DevCredentials.password;
+    _keyTouched = key.isNotEmpty;
+    _passwordTouched = DevCredentials.password.isNotEmpty;
   }
 
   @override

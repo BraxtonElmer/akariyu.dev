@@ -10,6 +10,7 @@ desktop.ini
 *.iws
 .vscode/launch.json
 .history/
+.claude/
 
 # Logs / crash reports
 *.log
@@ -24,6 +25,9 @@ flutter_*.log
 secrets/
 .env
 .env.*
+
+# Local dev credentials prefill (template lives next to it as .example)
+**/lib/dev_credentials.dart
 
 # Flutter / Dart build outputs (Flutter subproject also has its own .gitignore)
 **/build/

@@ -84,6 +84,19 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final atRoot = _path == null || _path == '/';
+    return PopScope(
+      canPop: atRoot,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop || _path == null || _path == '/') return;
+        final parent = p.posix.dirname(_path!);
+        setState(() => _path = parent);
+      },
+      child: _buildScaffold(),
+    );
+  }
+
+  Widget _buildScaffold() {
     return Scaffold(
       backgroundColor: AkariyuColors.backgroundBase,
       appBar: AppBar(
