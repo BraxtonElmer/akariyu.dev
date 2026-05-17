@@ -31,6 +31,8 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
   String? _path;
   bool _showHidden = false;
   String _filter = '';
+  String? _resolveError;
+  bool _resolving = false;
 
   @override
   void initState() {
@@ -42,8 +44,31 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
   }
 
   Future<void> _resolveHome() async {
-    final home = await ref.read(homeDirectoryProvider(widget.serverId).future);
-    if (mounted) setState(() => _path = home);
+    setState(() {
+      _resolving = true;
+      _resolveError = null;
+    });
+    try {
+      final home = await ref
+          .read(homeDirectoryProvider(widget.serverId).future)
+          .timeout(const Duration(seconds: 20));
+      if (mounted) setState(() => _path = home);
+    } catch (e) {
+      if (!mounted) return;
+      // Fallback: best-guess home from the profile, else root. Lets the user
+      // still browse even when SFTP REALPATH misbehaves.
+      final profile = ref
+          .read(serverListProvider)
+          .valueOrNull
+          ?.where((p) => p.id == widget.serverId)
+          .firstOrNull;
+      setState(() {
+        _resolveError = e.toString();
+        _path = profile != null ? '/home/${profile.username}' : '/';
+      });
+    } finally {
+      if (mounted) setState(() => _resolving = false);
+    }
   }
 
   void _navigateTo(String path) {
@@ -94,9 +119,18 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
       ),
       body: SafeArea(
         child: _path == null
-            ? const Center(child: CircularProgressIndicator())
+            ? _ResolvingHome(
+                busy: _resolving,
+                error: _resolveError,
+                onRetry: _resolveHome,
+              )
             : Column(
                 children: [
+                  if (_resolveError != null)
+                    _ResolveWarningBanner(
+                      message: _resolveError!,
+                      onRetry: _resolveHome,
+                    ),
                   _Breadcrumbs(path: _path!, onTap: _navigateTo),
                   _SearchBar(
                     value: _filter,
@@ -553,6 +587,93 @@ class _EntryTile extends StatelessWidget {
     if (diff.inHours > 0) return '${diff.inHours}h ago';
     if (diff.inMinutes > 0) return '${diff.inMinutes}m ago';
     return 'just now';
+  }
+}
+
+class _ResolvingHome extends StatelessWidget {
+  const _ResolvingHome({
+    required this.busy,
+    required this.error,
+    required this.onRetry,
+  });
+
+  final bool busy;
+  final String? error;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    if (busy) return const Center(child: CircularProgressIndicator());
+    if (error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.warning_amber_rounded,
+                  size: 40, color: AkariyuColors.warning),
+              const SizedBox(height: 12),
+              Text('Could not resolve home directory',
+                  style: AkariyuTypography.titleLarge,
+                  textAlign: TextAlign.center),
+              const SizedBox(height: 8),
+              Text(error!,
+                  style: AkariyuTypography.bodySmall,
+                  textAlign: TextAlign.center),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: 180,
+                child: AkariyuButton(
+                  label: 'Retry',
+                  variant: AkariyuButtonVariant.secondary,
+                  fullWidth: true,
+                  onPressed: onRetry,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return const Center(child: CircularProgressIndicator());
+  }
+}
+
+class _ResolveWarningBanner extends StatelessWidget {
+  const _ResolveWarningBanner({required this.message, required this.onRetry});
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AkariyuColors.warning.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: AkariyuColors.warning.withValues(alpha: 0.4),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.warning_amber_rounded,
+              size: 16, color: AkariyuColors.warning),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Falling back from SFTP home lookup. $message',
+              style: AkariyuTypography.bodySmall,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          TextButton(onPressed: onRetry, child: const Text('Retry')),
+        ],
+      ),
+    );
   }
 }
 

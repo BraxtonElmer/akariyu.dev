@@ -65,10 +65,16 @@ class FsEntry {
 }
 
 class SftpException implements Exception {
-  SftpException(this.message);
+  const SftpException(this.message);
   final String message;
   @override
   String toString() => 'SftpException: $message';
+}
+
+class SftpTimeoutException extends SftpException {
+  const SftpTimeoutException(super.message);
+  @override
+  String toString() => 'SftpTimeoutException: $message';
 }
 
 /// Format a byte count for human display: `1.4 MB`, `812 B`, etc.

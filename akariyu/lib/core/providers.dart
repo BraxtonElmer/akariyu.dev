@@ -157,13 +157,16 @@ final connectionStateProvider =
 });
 
 /// Opens an [SftpService] over the currently-active SSH connection for
-/// server [id]. Auto-connects if needed. The service is auto-disposed when
-/// the screen using it unmounts.
+/// server [id]. Auto-connects if needed. Kept alive while at least one
+/// screen has read it once — the connection manager owns full lifecycle.
 final sftpServiceProvider =
-    FutureProvider.autoDispose.family<SftpService, String>((ref, id) async {
+    FutureProvider.family<SftpService, String>((ref, id) async {
   final mgr = ref.read(connectionManagerProvider);
   final conn = mgr.connectionFor(id) ?? await mgr.connect(id);
-  final service = await SftpService.open(conn);
+  final service = await SftpService.open(conn)
+      .timeout(const Duration(seconds: 15),
+          onTimeout: () => throw const SftpTimeoutException(
+              'SFTP subsystem did not respond within 15s'));
   ref.onDispose(service.close);
   return service;
 });
