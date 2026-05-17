@@ -125,6 +125,50 @@ class SshConnection {
     );
   }
 
+  /// Run a command and stream stdout/stderr through callbacks as bytes
+  /// arrive. Used by long-running installs so the UI can show a live tail
+  /// instead of waiting for the whole job to finish.
+  Future<SshCommandResult> runStreaming(
+    String command, {
+    void Function(String chunk)? onStdout,
+    void Function(String chunk)? onStderr,
+    Duration? timeout,
+  }) async {
+    if (isClosed) throw SshConnectionException('Connection is closed');
+    final session = await _client.execute(command);
+    final stdoutBuf = <int>[];
+    final stderrBuf = <int>[];
+
+    final stdoutSub = session.stdout.listen((bytes) {
+      stdoutBuf.addAll(bytes);
+      if (onStdout != null) {
+        onStdout(utf8.decode(bytes, allowMalformed: true));
+      }
+    });
+    final stderrSub = session.stderr.listen((bytes) {
+      stderrBuf.addAll(bytes);
+      if (onStderr != null) {
+        onStderr(utf8.decode(bytes, allowMalformed: true));
+      }
+    });
+
+    Future<void> done = session.done;
+    if (timeout != null) {
+      done = done.timeout(timeout, onTimeout: () async {
+        session.close();
+      });
+    }
+    await done;
+    await stdoutSub.cancel();
+    await stderrSub.cancel();
+
+    return SshCommandResult(
+      exitCode: session.exitCode ?? -1,
+      stdout: utf8.decode(stdoutBuf, allowMalformed: true),
+      stderr: utf8.decode(stderrBuf, allowMalformed: true),
+    );
+  }
+
   /// "Test connection" probe used by onboarding. Runs `whoami` and `uname -a`.
   Future<ConnectionTestResult> probe() async {
     try {

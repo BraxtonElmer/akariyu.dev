@@ -80,6 +80,46 @@ class ClaudeLiveSession {
   final String sessionId;
   final String cwd;
 
+  String? _claudePathCache;
+
+  /// Resolve `claude`'s absolute path on the server via a login shell so
+  /// the user's full PATH (npm prefix, asdf, nvm, `~/.local/bin`, …)
+  /// applies. Cached per-instance — refresh by calling [resetCache].
+  ///
+  /// Explicitly sources `~/.nvm/nvm.sh` in case the user's dotfiles
+  /// short-circuit on non-interactive shells before nvm gets loaded.
+  ///
+  /// Returns the absolute path, or `null` if claude isn't installed.
+  Future<String?> resolveClaudePath() async {
+    final cached = _claudePathCache;
+    if (cached != null) return cached.isEmpty ? null : cached;
+    final res = await ssh.run(
+      'bash -lc ${_sh(_withNvm("command -v claude || true"))}',
+      timeout: const Duration(seconds: 5),
+    );
+    final path = res.stdout.trim();
+    _claudePathCache = path;
+    return path.isEmpty ? null : path;
+  }
+
+  /// Wraps [cmd] with the env prelude every claude invocation needs:
+  ///   - source nvm if present
+  ///   - prepend the per-user npm-global prefix to PATH
+  /// No-op on systems that don't have either.
+  String _withNvm(String cmd) {
+    return r'''
+[ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh"
+export PATH="$HOME/.npm-global/bin:$PATH"
+''' +
+        cmd;
+  }
+
+  /// Force a re-resolution next time. Call after an install so the cached
+  /// "not found" result is invalidated.
+  void resetClaudePathCache() {
+    _claudePathCache = null;
+  }
+
   Future<ClaudeSendResult> sendMessage(
     String text, {
     ClaudeSendConfig config = const ClaudeSendConfig(),
@@ -87,6 +127,11 @@ class ClaudeLiveSession {
   }) async {
     if (text.isEmpty) {
       throw ClaudeLiveSessionException('Empty message');
+    }
+
+    final claudePath = await resolveClaudePath();
+    if (claudePath == null) {
+      throw const ClaudeNotInstalledException();
     }
 
     // Stage the prompt in a tmp file so we don't need to shell-escape
@@ -102,12 +147,18 @@ class ClaudeLiveSession {
         ? ''
         : '--permission-mode ${_sh(config.permissionMode)} ';
 
-    final cmd =
-        '${cdPart}claude --resume ${_sh(sessionId)} '
-        '$modelPart$permissionPart-p < ${_sh(stagePath)} 2>&1';
+    // Use bash -lc so the user's environment (api key in .bashrc, etc.)
+    // is honored. Source nvm in case the user's dotfiles short-circuit
+    // for non-interactive shells. Inner command is single-quoted; inner
+    // single quotes escape via the canonical `'\''` idiom.
+    final inner = _withNvm(
+      '$cdPart${_sh(claudePath)} --resume ${_sh(sessionId)} '
+      '$modelPart$permissionPart-p < ${_sh(stagePath)} 2>&1',
+    );
+    final wrapped = 'bash -lc ${_sh(inner)}';
 
     try {
-      final res = await ssh.run(cmd, timeout: timeout);
+      final res = await ssh.run(wrapped, timeout: timeout);
       return ClaudeSendResult(
         exitCode: res.exitCode,
         stdout: res.stdout,
@@ -121,14 +172,103 @@ class ClaudeLiveSession {
     }
   }
 
+  /// Self-bootstrapping install: if npm is missing, install nvm + node
+  /// LTS first, then install `@anthropic-ai/claude-code` globally. All
+  /// without sudo — everything lands under `$HOME/.nvm`.
+  ///
+  /// [onChunk] receives stdout/stderr text as it arrives so the UI can
+  /// render a live tail.
+  Future<ClaudeSendResult> installClaude({
+    void Function(String chunk)? onChunk,
+    Duration timeout = const Duration(minutes: 10),
+  }) async {
+    // Heredoc-style script. Strategy:
+    //   1. Use nvm-installed node LTS if the system npm is missing or
+    //      ancient (Node < 18).
+    //   2. Point npm at a per-user prefix ($HOME/.npm-global) so global
+    //      installs never need sudo, even when npm itself came from
+    //      apt/dnf/pacman.
+    //   3. On failure, dump the most recent npm debug log so the dialog
+    //      shows something more actionable than "exit 1".
+    const script = r'''
+set -e
+mkdir -p "$HOME/.npm-global"
+
+NEED_NVM=false
+if ! command -v npm >/dev/null 2>&1; then
+  echo ">>> npm not found"
+  NEED_NVM=true
+else
+  NODE_MAJ=$(node -v 2>/dev/null | sed 's/v//' | cut -d. -f1)
+  if [ -z "$NODE_MAJ" ] || [ "$NODE_MAJ" -lt 18 ]; then
+    echo ">>> node version too old (v${NODE_MAJ:-?}); will install LTS via nvm"
+    NEED_NVM=true
+  else
+    echo ">>> system npm OK (node v$NODE_MAJ)"
+  fi
+fi
+
+if [ "$NEED_NVM" = true ]; then
+  echo ">>> installing nvm + node LTS"
+  curl -fsSL -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+  export NVM_DIR="$HOME/.nvm"
+  . "$NVM_DIR/nvm.sh"
+  nvm install --lts
+  nvm use --lts
+fi
+
+# Per-user global prefix avoids EACCES on system-installed npm.
+npm config set prefix "$HOME/.npm-global" 2>/dev/null || true
+export PATH="$HOME/.npm-global/bin:$PATH"
+
+echo ">>> installing @anthropic-ai/claude-code"
+if ! npm install -g @anthropic-ai/claude-code 2>&1; then
+  echo ">>> npm install failed; tail of latest npm log:"
+  LATEST_LOG=$(ls -t "$HOME/.npm/_logs" 2>/dev/null | head -1)
+  if [ -n "$LATEST_LOG" ]; then
+    tail -120 "$HOME/.npm/_logs/$LATEST_LOG"
+  else
+    echo "(no npm log found in $HOME/.npm/_logs)"
+  fi
+  exit 1
+fi
+
+echo ">>> verifying"
+[ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh"
+export PATH="$HOME/.npm-global/bin:$PATH"
+command -v claude
+claude --version
+echo ">>> done"
+''';
+    final res = await ssh.runStreaming(
+      'bash -lc ${_sh(script)}',
+      onStdout: onChunk,
+      onStderr: onChunk,
+      timeout: timeout,
+    );
+    resetClaudePathCache();
+    return ClaudeSendResult(
+      exitCode: res.exitCode,
+      stdout: res.stdout,
+      stderr: res.stderr,
+    );
+  }
+
   String _sh(String v) => "'${v.replaceAll("'", r"'\''")}'";
 }
 
 class ClaudeLiveSessionException implements Exception {
-  ClaudeLiveSessionException(this.message);
+  const ClaudeLiveSessionException(this.message);
   final String message;
   @override
   String toString() => 'ClaudeLiveSessionException: $message';
+}
+
+/// `claude` binary missing from the server's PATH. UI catches this and
+/// offers to install via npm.
+class ClaudeNotInstalledException extends ClaudeLiveSessionException {
+  const ClaudeNotInstalledException()
+      : super('Claude Code is not installed on this server.');
 }
 
 /// Snapshot of the JSONL file's freshness — used by polling.

@@ -85,20 +85,16 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
     }
   }
 
-  Future<void> _send() async {
-    final text = _inputController.text.trim();
+  Future<void> _send({String? overrideText}) async {
+    final text = (overrideText ?? _inputController.text).trim();
     if (text.isEmpty || _waiting) return;
     HapticFeedback.mediumImpact();
     setState(() {
       _waiting = true;
       _sendError = null;
     });
-    _inputController.clear();
+    if (overrideText == null) _inputController.clear();
 
-    // Kick off a poll loop *now* so the UI shows incremental progress
-    // while Claude is mid-turn (each block writes a new JSONL line). The
-    // SSH command below blocks until `claude -p` exits; when it returns
-    // we stop polling whether or not the file has settled.
     _lastStat = await _safeStat();
     _startPolling();
 
@@ -107,8 +103,6 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
       final cfg = ref.read(claudeSendConfigProvider).valueOrNull ??
           const ClaudeSendConfig();
       final result = await live.sendMessage(text, config: cfg);
-      // Final refresh, regardless of whether stat-polling already caught
-      // every change.
       ref.invalidate(claudeChatHistoryProvider(_chatKey));
       _stopPolling();
       if (!mounted) return;
@@ -116,11 +110,142 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
         setState(() => _sendError =
             'claude exit ${result.exitCode}: ${result.stdout.trim()}');
       }
+    } on ClaudeNotInstalledException {
+      _stopPolling();
+      if (!mounted) return;
+      // Offer to install, then retry the same message.
+      final installed = await _promptInstall();
+      if (installed && mounted) {
+        await _send(overrideText: text);
+      }
     } catch (e) {
       _stopPolling();
       if (!mounted) return;
       setState(() => _sendError = e.toString());
     }
+  }
+
+  /// Shows an install-claude dialog. Returns true on a successful install.
+  Future<bool> _promptInstall() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AkariyuColors.surfaceElevated,
+        title: Text('Install Claude Code?',
+            style: AkariyuTypography.titleLarge),
+        content: Text(
+          'Claude Code (`claude` CLI) wasn\'t found in your server\'s PATH. '
+          'Install it now via `npm install -g @anthropic-ai/claude-code`?',
+          style: AkariyuTypography.bodyMedium,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Not now'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Install',
+                style: TextStyle(color: AkariyuColors.accent)),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return false;
+    return _runInstall();
+  }
+
+  Future<bool> _runInstall() async {
+    final controller = ValueNotifier<_InstallProgress>(
+      const _InstallProgress(running: true, tail: 'Starting install…'),
+    );
+    final buf = StringBuffer();
+    void append(String chunk) {
+      buf.write(chunk);
+      // Keep only the last ~8 KB so the dialog doesn't grow unbounded
+      // for nvm's noisy curl + npm output.
+      final s = buf.toString();
+      final tail = s.length > 8192 ? s.substring(s.length - 8192) : s;
+      controller.value = _InstallProgress(running: true, tail: tail);
+    }
+
+    // Fire the install + plumb the result back to the dialog.
+    () async {
+      try {
+        final live =
+            await ref.read(claudeLiveSessionProvider(_liveKey).future);
+        final res = await live.installClaude(onChunk: append);
+        controller.value = _InstallProgress(
+          running: false,
+          tail: buf.toString(),
+          ok: res.ok,
+          error: res.ok ? null : 'install exit ${res.exitCode}',
+        );
+      } catch (e) {
+        controller.value = _InstallProgress(
+          running: false,
+          tail: buf.isEmpty ? e.toString() : buf.toString(),
+          ok: false,
+          error: e.toString(),
+        );
+      }
+    }();
+
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => ValueListenableBuilder<_InstallProgress>(
+        valueListenable: controller,
+        builder: (ctx, p, _) => AlertDialog(
+          backgroundColor: AkariyuColors.surfaceElevated,
+          title: Text(
+            p.running
+                ? 'Installing Claude Code…'
+                : p.ok
+                    ? 'Install succeeded'
+                    : 'Install failed',
+            style: AkariyuTypography.titleLarge,
+          ),
+          content: SizedBox(
+            width: 360,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (p.running) const LinearProgressIndicator(minHeight: 2),
+                if (p.running) const SizedBox(height: 12),
+                Container(
+                  height: 160,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: AkariyuColors.surfaceCard,
+                    borderRadius: BorderRadius.circular(8),
+                    border:
+                        Border.all(color: AkariyuColors.borderSubtle),
+                  ),
+                  child: SingleChildScrollView(
+                    reverse: true,
+                    child: SelectableText(
+                      p.tail.isEmpty ? ' ' : p.tail,
+                      style: AkariyuTypography.monoSmall
+                          .copyWith(fontSize: 11),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            if (!p.running)
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, p.ok),
+                child: const Text('Close'),
+              ),
+          ],
+        ),
+      ),
+    );
+    controller.dispose();
+    return ok == true;
   }
 
   /// Light polling while a send is in flight — refresh the chat view as
@@ -254,6 +379,21 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
       ),
     );
   }
+}
+
+/// Snapshot of an in-flight `npm install -g …` for the install dialog.
+class _InstallProgress {
+  const _InstallProgress({
+    required this.running,
+    required this.tail,
+    this.ok = false,
+    this.error,
+  });
+
+  final bool running;
+  final String tail;
+  final bool ok;
+  final String? error;
 }
 
 /// Two-line title in the chat app bar: "Session" + current model /
