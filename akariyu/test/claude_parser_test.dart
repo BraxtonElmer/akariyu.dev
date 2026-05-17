@@ -118,6 +118,30 @@ oops
       final meta = ClaudeSessionMeta.extract(body);
       expect(meta.summary, 'New title');
     });
+
+    test('picks up ai-title event (current Claude Code format)', () {
+      const body = '''
+{"type":"ai-title","aiTitle":"Build app following specification phases","sessionId":"abc"}
+{"type":"user","uuid":"u1","message":{"role":"user","content":"hi"}}
+''';
+      final meta = ClaudeSessionMeta.extract(body);
+      expect(meta.summary, 'Build app following specification phases');
+      expect(meta.messageCount, 1);
+    });
+
+    test('skips bookkeeping events from message count', () {
+      const body = '''
+{"type":"queue-operation","operation":"enqueue","sessionId":"abc"}
+{"type":"queue-operation","operation":"dequeue","sessionId":"abc"}
+{"type":"user","uuid":"u1","message":{"role":"user","content":"hi"}}
+{"type":"attachment","uuid":"x","attachment":{}}
+{"type":"file-history-snapshot","messageId":"u1","snapshot":{}}
+{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"hey"}]}}
+''';
+      final meta = ClaudeSessionMeta.extract(body);
+      expect(meta.messageCount, 2,
+          reason: 'queue-operation, attachment, file-history-snapshot must not count');
+    });
   });
 
   group('ClaudeProject decoding', () {

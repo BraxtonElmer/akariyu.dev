@@ -33,11 +33,18 @@ class ClaudeJsonlParser {
 
     final type = (json['type'] as String?) ?? 'unknown';
 
-    // `cwd` lives at the top level of every event Claude Code emits,
-    // regardless of `type`. Extract once so every branch carries it.
+    // `cwd` lives at the top level of every event Claude Code emits that
+    // belongs to a session, but bookkeeping events (queue-operation,
+    // ai-title, file-history-snapshot…) don't carry it.
     final cwd = json['cwd'] as String?;
 
-    if (type == 'summary') {
+    // Claude Code's auto-generated session title comes in as its own event:
+    //   {"type":"ai-title","aiTitle":"…","sessionId":"…"}
+    // Older builds wrote {"type":"summary","summary":"…"} — handle both.
+    if (type == 'ai-title' || type == 'summary') {
+      final title = (json['aiTitle'] as String?) ??
+          (json['summary'] as String?) ??
+          '';
       return ClaudeMessage(
         uuid: json['uuid'] as String?,
         parentUuid: json['parentUuid'] as String?,
@@ -46,15 +53,17 @@ class ClaudeJsonlParser {
         timestamp: _ts(json['timestamp']),
         blocks: const [],
         cwd: cwd,
-        summary: (json['summary'] as String?) ?? '',
+        summary: title,
       );
     }
 
     // user / assistant / system → look at the wrapped `message` object.
     final message = json['message'];
     if (message is! Map<String, dynamic>) {
-      // Some lines (e.g. tool_use_request markers) lack message; surface as
-      // an empty text block of the line type so they show up if needed.
+      // Bookkeeping events (queue-operation, file-history-snapshot,
+      // attachment, etc.) have no `message`. Surface them as empty so the
+      // chat view can filter them out, and the session-meta counter knows
+      // to skip them.
       return ClaudeMessage(
         uuid: json['uuid'] as String?,
         parentUuid: json['parentUuid'] as String?,
@@ -211,9 +220,9 @@ class ClaudeSessionMeta {
       if (msg.isSummary) {
         final s = msg.summary?.trim();
         if (s != null && s.isNotEmpty) latestSummary = s;
-        // Summary rows don't count toward the message tally.
         continue;
       }
+      if (!_isChatEvent(msg.type)) continue;
       count++;
       if (msg.timestamp != null) lastAt = msg.timestamp;
       final text = _firstText(msg);
@@ -238,4 +247,16 @@ class ClaudeSessionMeta {
     }
     return null;
   }
+
+  /// Only `user` / `assistant` / `system` rows are real chat events.
+  /// Everything else (`queue-operation`, `attachment`,
+  /// `file-history-snapshot`, `ai-title`, …) is bookkeeping that we don't
+  /// want to count toward the message tally or render in the chat view.
+  static bool _isChatEvent(String type) =>
+      type == 'user' || type == 'assistant' || type == 'system';
 }
+
+/// Shared helper used by both the parser and the chat view to decide which
+/// JSONL event types are real chat turns vs internal bookkeeping.
+bool isClaudeChatEvent(String type) =>
+    type == 'user' || type == 'assistant' || type == 'system';
