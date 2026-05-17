@@ -136,6 +136,7 @@ class ClaudeService {
         lastMessagePreview: meta?.lastMessagePreview,
         lastMessageAt: meta?.lastMessageAt ?? f.modifiedAt,
         messageCount: meta?.messageCount ?? 0,
+        summary: meta?.summary,
       );
     }));
 

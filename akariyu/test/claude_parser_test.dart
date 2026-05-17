@@ -95,6 +95,28 @@ oops
       expect(meta.lastMessagePreview, 'thanks');
       expect(meta.messageCount, 3);
       expect(meta.lastMessageAt, isNotNull);
+      expect(meta.summary, isNull);
+    });
+
+    test('picks up summary line as session title', () {
+      const body = '''
+{"type":"summary","uuid":"s1","summary":"Refactor auth flow"}
+{"type":"user","uuid":"u1","timestamp":"2026-05-17T10:00:00Z","message":{"role":"user","content":"hi"}}
+''';
+      final meta = ClaudeSessionMeta.extract(body);
+      expect(meta.summary, 'Refactor auth flow');
+      // Summary rows don't count toward message tally.
+      expect(meta.messageCount, 1);
+    });
+
+    test('uses most recent summary when multiple exist', () {
+      const body = '''
+{"type":"summary","uuid":"s1","summary":"Old title"}
+{"type":"user","uuid":"u1","message":{"role":"user","content":"hi"}}
+{"type":"summary","uuid":"s2","summary":"New title"}
+''';
+      final meta = ClaudeSessionMeta.extract(body);
+      expect(meta.summary, 'New title');
     });
   });
 
@@ -122,7 +144,7 @@ oops
   });
 
   group('ClaudeSession title', () {
-    ClaudeSession make(String? first) => ClaudeSession(
+    ClaudeSession make({String? first, String? summary}) => ClaudeSession(
           id: 'id',
           projectDir: 'p',
           fileName: 'id.jsonl',
@@ -131,19 +153,27 @@ oops
           lastMessagePreview: null,
           lastMessageAt: null,
           messageCount: 0,
+          summary: summary,
         );
 
     test('falls back to "Untitled session"', () {
-      expect(make(null).title, 'Untitled session');
-      expect(make('').title, 'Untitled session');
+      expect(make().title, 'Untitled session');
+      expect(make(first: '').title, 'Untitled session');
     });
 
     test('takes first line, truncates over 60 chars', () {
-      expect(make('hello\nworld').title, 'hello');
+      expect(make(first: 'hello\nworld').title, 'hello');
       final long = 'x' * 80;
-      final t = make(long).title;
+      final t = make(first: long).title;
       expect(t.length, 61); // 60 chars + ellipsis
       expect(t.endsWith('…'), isTrue);
+    });
+
+    test('prefers summary over first user message', () {
+      expect(
+        make(first: 'long prompt text', summary: 'Refactor auth').title,
+        'Refactor auth',
+      );
     });
   });
 }

@@ -186,6 +186,7 @@ class ClaudeSessionMeta {
     required this.lastMessagePreview,
     required this.lastMessageAt,
     required this.messageCount,
+    required this.summary,
   });
 
   final String? firstUserMessage;
@@ -193,16 +194,26 @@ class ClaudeSessionMeta {
   final DateTime? lastMessageAt;
   final int messageCount;
 
+  /// Most recent summary line — Claude Code's own generated session title.
+  final String? summary;
+
   static ClaudeSessionMeta extract(String body) {
     String? firstUser;
     String? lastPreview;
     DateTime? lastAt;
+    String? latestSummary;
     var count = 0;
 
     for (final line in const LineSplitter().convert(body)) {
       if (line.trim().isEmpty) continue;
       final msg = ClaudeJsonlParser.parseLine(line);
       if (msg == null) continue;
+      if (msg.isSummary) {
+        final s = msg.summary?.trim();
+        if (s != null && s.isNotEmpty) latestSummary = s;
+        // Summary rows don't count toward the message tally.
+        continue;
+      }
       count++;
       if (msg.timestamp != null) lastAt = msg.timestamp;
       final text = _firstText(msg);
@@ -217,6 +228,7 @@ class ClaudeSessionMeta {
       lastMessagePreview: lastPreview,
       lastMessageAt: lastAt,
       messageCount: count,
+      summary: latestSummary,
     );
   }
 
