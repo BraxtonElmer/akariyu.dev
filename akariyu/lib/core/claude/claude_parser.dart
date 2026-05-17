@@ -33,6 +33,10 @@ class ClaudeJsonlParser {
 
     final type = (json['type'] as String?) ?? 'unknown';
 
+    // `cwd` lives at the top level of every event Claude Code emits,
+    // regardless of `type`. Extract once so every branch carries it.
+    final cwd = json['cwd'] as String?;
+
     if (type == 'summary') {
       return ClaudeMessage(
         uuid: json['uuid'] as String?,
@@ -41,6 +45,7 @@ class ClaudeJsonlParser {
         type: 'summary',
         timestamp: _ts(json['timestamp']),
         blocks: const [],
+        cwd: cwd,
         summary: (json['summary'] as String?) ?? '',
       );
     }
@@ -57,6 +62,7 @@ class ClaudeJsonlParser {
         type: type,
         timestamp: _ts(json['timestamp']),
         blocks: const [],
+        cwd: cwd,
       );
     }
 
@@ -73,7 +79,7 @@ class ClaudeJsonlParser {
       blocks: blocks,
       model: model,
       isSidechain: (json['isSidechain'] as bool?) ?? false,
-      cwd: json['cwd'] as String?,
+      cwd: cwd,
     );
   }
 

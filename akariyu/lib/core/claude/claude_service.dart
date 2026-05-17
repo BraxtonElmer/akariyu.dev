@@ -52,48 +52,54 @@ class ClaudeService {
     }
     final dirs = entries.where((e) => e.isDirectory).toList();
 
-    final projects = <ClaudeProject>[];
-    for (final d in dirs) {
-      // Count sessions in this project.
-      List<FsEntry> files;
-      try {
-        files = await sftp.listDirectory(d.path);
-      } catch (_) {
-        continue;
-      }
-      final sessions = files.where((f) => f.name.endsWith('.jsonl')).toList();
-      DateTime? newest;
-      FsEntry? newestEntry;
-      for (final s in sessions) {
-        if (s.modifiedAt == null) continue;
-        if (newest == null || s.modifiedAt!.isAfter(newest)) {
-          newest = s.modifiedAt;
-          newestEntry = s;
-        }
-      }
-      // Peek into the newest session for the authoritative `cwd` — the
-      // encoded dir name replaces both `/` and `.` with `-`, so we can't
-      // reliably reverse it without help.
-      final cwd = await _peekCwd(newestEntry ??
-          (sessions.isEmpty ? null : sessions.first));
-      projects.add(ClaudeProject(
-        encodedDirName: d.name,
-        absoluteDir: d.path,
-        sessionCount: sessions.length,
-        lastModified: newest ?? d.modifiedAt,
-        cwd: cwd,
-      ));
-    }
+    // Fan out per-project work — each iteration is two sequential SFTP
+    // round-trips (listdir + peek for cwd), so doing them serially makes
+    // the projects screen feel sluggish on servers with many projects.
+    final results = await Future.wait(dirs.map(_loadProjectSummary));
+    final projects = results.whereType<ClaudeProject>().toList();
 
     projects.sort((a, b) {
       final at = a.lastModified;
       final bt = b.lastModified;
-      if (at == null && bt == null) return a.encodedDirName.compareTo(b.encodedDirName);
+      if (at == null && bt == null) {
+        return a.encodedDirName.compareTo(b.encodedDirName);
+      }
       if (at == null) return 1;
       if (bt == null) return -1;
       return bt.compareTo(at);
     });
     return projects;
+  }
+
+  /// Load one project's summary (session count + newest mtime + cwd) in
+  /// one task so the caller can [Future.wait] across all projects.
+  Future<ClaudeProject?> _loadProjectSummary(FsEntry dir) async {
+    List<FsEntry> files;
+    try {
+      files = await sftp.listDirectory(dir.path);
+    } catch (_) {
+      return null;
+    }
+    final sessions = files.where((f) => f.name.endsWith('.jsonl')).toList();
+    DateTime? newest;
+    FsEntry? newestEntry;
+    for (final s in sessions) {
+      if (s.modifiedAt == null) continue;
+      if (newest == null || s.modifiedAt!.isAfter(newest)) {
+        newest = s.modifiedAt;
+        newestEntry = s;
+      }
+    }
+    final cwd = await _peekCwd(
+      newestEntry ?? (sessions.isEmpty ? null : sessions.first),
+    );
+    return ClaudeProject(
+      encodedDirName: dir.name,
+      absoluteDir: dir.path,
+      sessionCount: sessions.length,
+      lastModified: newest ?? dir.modifiedAt,
+      cwd: cwd,
+    );
   }
 
   /// List sessions under [project], sorted newest first. Reads the full
@@ -106,22 +112,22 @@ class ClaudeService {
         .where((e) => e.isFile && e.name.endsWith('.jsonl'))
         .toList();
 
-    final out = <ClaudeSession>[];
-    for (final f in jsonl) {
+    // Read all sessions in parallel. Each is at most one SFTP round-trip
+    // (stat + open + read + close), so fanning out shaves seconds off the
+    // sessions screen on projects with 10+ sessions.
+    final out = await Future.wait(jsonl.map((f) async {
       final id = f.name.endsWith('.jsonl')
           ? f.name.substring(0, f.name.length - 6)
           : f.name;
       ClaudeSessionMeta? meta;
       try {
-        // Read up to maxBytesPerFile; for huge sessions we still get the
-        // first user message + a reasonable preview. We re-read the full
-        // file when the user opens the chat view.
-        final body = await sftp.readText(f.path, maxBytes: maxBytesPerFile);
+        final body =
+            await sftp.readTextHead(f.path, maxBytes: maxBytesPerFile);
         meta = ClaudeSessionMeta.extract(body);
       } catch (_) {
         meta = null;
       }
-      out.add(ClaudeSession(
+      return ClaudeSession(
         id: id,
         projectDir: project.encodedDirName,
         fileName: f.name,
@@ -130,8 +136,8 @@ class ClaudeService {
         lastMessagePreview: meta?.lastMessagePreview,
         lastMessageAt: meta?.lastMessageAt ?? f.modifiedAt,
         messageCount: meta?.messageCount ?? 0,
-      ));
-    }
+      );
+    }));
 
     out.sort((a, b) {
       final at = a.lastMessageAt;
@@ -151,20 +157,24 @@ class ClaudeService {
     return ClaudeJsonlParser.parseAll(body);
   }
 
-  /// Pull `cwd` from the first JSONL line of [entry], if possible. Used by
-  /// [listProjects] to get an accurate project path without reading every
-  /// session in full.
+  /// Pull `cwd` from the first non-empty JSONL line of [entry] that has
+  /// one. Used by [listProjects] to get an accurate project path without
+  /// reading every session in full.
+  ///
+  /// Scans up to the first ~32 lines because some JSONL files start with
+  /// a `summary` row or other event that doesn't carry `cwd`.
   Future<String?> _peekCwd(FsEntry? entry) async {
     if (entry == null) return null;
     try {
-      // First line is typically <2 KB. Read a small slice to keep this
-      // cheap even for huge sessions.
-      final body = await sftp.readTextHead(entry.path, maxBytes: 8 * 1024);
-      final newline = body.indexOf('\n');
-      final firstLine = newline >= 0 ? body.substring(0, newline) : body;
-      final msg = ClaudeJsonlParser.parseLine(firstLine);
-      final cwd = msg?.cwd;
-      if (cwd != null && cwd.isNotEmpty) return cwd;
+      final body = await sftp.readTextHead(entry.path, maxBytes: 32 * 1024);
+      var scanned = 0;
+      for (final line in body.split('\n')) {
+        if (scanned++ > 32) break;
+        if (line.trim().isEmpty) continue;
+        final msg = ClaudeJsonlParser.parseLine(line);
+        final cwd = msg?.cwd;
+        if (cwd != null && cwd.isNotEmpty) return cwd;
+      }
     } catch (_) {
       // Best-effort — fall through to dir-name decoding.
     }
