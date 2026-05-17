@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'auth/biometric_service.dart';
+import 'claude/claude_live_session.dart';
 import 'claude/claude_models.dart';
 import 'claude/claude_service.dart';
 import 'ssh/sftp_service.dart';
@@ -277,6 +278,67 @@ class ClaudeChatKey {
       other.absolutePath == absolutePath;
   @override
   int get hashCode => Object.hash(serverId, absolutePath);
+}
+
+/// Long-lived [ClaudeLiveSession] for one (server, sessionId, cwd) tuple.
+/// The underlying tmux process keeps running on the server even when this
+/// provider is disposed — re-creating the wrapper just re-attaches.
+final claudeLiveSessionProvider =
+    FutureProvider.family<ClaudeLiveSession, ClaudeLiveKey>((ref, key) async {
+  final mgr = ref.read(connectionManagerProvider);
+  final conn = mgr.connectionFor(key.serverId) ??
+      await mgr.connect(key.serverId);
+  final sftp = await ref.watch(sftpServiceProvider(key.serverId).future);
+  return ClaudeLiveSession(
+    ssh: conn,
+    sftp: sftp,
+    sessionId: key.sessionId,
+    cwd: key.cwd,
+  );
+});
+
+class ClaudeLiveKey {
+  const ClaudeLiveKey({
+    required this.serverId,
+    required this.sessionId,
+    required this.cwd,
+  });
+  final String serverId;
+  final String sessionId;
+  final String cwd;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ClaudeLiveKey &&
+      other.serverId == serverId &&
+      other.sessionId == sessionId &&
+      other.cwd == cwd;
+  @override
+  int get hashCode => Object.hash(serverId, sessionId, cwd);
+}
+
+/// Persisted [ClaudeSendConfig] (model + permission mode) — currently
+/// global, can move to per-server later. Backed by secure storage.
+final claudeSendConfigProvider =
+    AsyncNotifierProvider<ClaudeSendConfigNotifier, ClaudeSendConfig>(
+        ClaudeSendConfigNotifier.new);
+
+class ClaudeSendConfigNotifier extends AsyncNotifier<ClaudeSendConfig> {
+  static const _storageKey = 'claudeSendConfig';
+
+  @override
+  Future<ClaudeSendConfig> build() async {
+    final raw = await ref.read(secureStorageProvider).readAppValue(_storageKey);
+    if (raw == null || raw.isEmpty) return const ClaudeSendConfig();
+    return ClaudeSendConfig.decode(raw);
+  }
+
+  Future<void> save(ClaudeSendConfig next) async {
+    state = AsyncValue.data(next);
+    await ref
+        .read(secureStorageProvider)
+        .writeAppValue(_storageKey, next.encode());
+  }
 }
 
 /// Multi-tab terminal state, keyed by server id.

@@ -74,8 +74,11 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/server/:id/claude/:project/sessions/:session',
         builder: (_, state) => ClaudeChatScreen(
           serverId: state.pathParameters['id']!,
+          sessionId: Uri.decodeComponent(state.pathParameters['session']!),
           absolutePath:
               Uri.decodeQueryComponent(state.uri.queryParameters['path'] ?? ''),
+          cwd: Uri.decodeQueryComponent(
+              state.uri.queryParameters['cwd'] ?? ''),
         ),
       ),
       GoRoute(

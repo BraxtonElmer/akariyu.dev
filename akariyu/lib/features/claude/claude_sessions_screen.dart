@@ -112,6 +112,7 @@ class _ClaudeSessionsScreenState extends ConsumerState<ClaudeSessionsScreen> {
                             itemBuilder: (_, i) => _SessionTile(
                               serverId: widget.serverId,
                               session: filtered[i],
+                              cwd: project.cwd,
                             ),
                           ),
                         ),
@@ -152,10 +153,18 @@ class _SearchField extends StatelessWidget {
 }
 
 class _SessionTile extends StatelessWidget {
-  const _SessionTile({required this.serverId, required this.session});
+  const _SessionTile({
+    required this.serverId,
+    required this.session,
+    required this.cwd,
+  });
 
   final String serverId;
   final ClaudeSession session;
+
+  /// Project cwd — passed via query string into the chat screen so the
+  /// live tmux session can `cd` into the right place when resuming.
+  final String? cwd;
 
   String _ago(DateTime? t) {
     if (t == null) return '';
@@ -173,7 +182,8 @@ class _SessionTile extends StatelessWidget {
       onTap: () => context.push(
         '/server/$serverId/claude/${Uri.encodeComponent(session.projectDir)}'
         '/sessions/${Uri.encodeComponent(session.id)}'
-        '?path=${Uri.encodeQueryComponent(session.absolutePath)}',
+        '?path=${Uri.encodeQueryComponent(session.absolutePath)}'
+        '&cwd=${Uri.encodeQueryComponent(cwd ?? '')}',
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
