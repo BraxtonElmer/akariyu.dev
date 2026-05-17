@@ -110,29 +110,26 @@ class _ServerTile extends ConsumerStatefulWidget {
 }
 
 class _ServerTileState extends ConsumerState<_ServerTile> {
-  bool _busy = false;
   String? _error;
 
-  Future<void> _connect({bool openShell = true}) async {
+  /// Opens the server shell immediately. The shell's tabs (SFTP, terminal,
+  /// claude) auto-connect on demand, so we don't have to await an SSH
+  /// handshake before navigating — a slow connect would otherwise leave
+  /// the user staring at the home tile.
+  void _openShell() {
     HapticFeedback.lightImpact();
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      await ref.read(connectionManagerProvider).connect(widget.profile.id);
-      if (!mounted) return;
-      if (openShell) {
-        await context.push('/server/${widget.profile.id}');
-      }
-    } catch (e) {
-      setState(() => _error = e.toString());
-    } finally {
-      if (mounted) setState(() => _busy = false);
+    setState(() => _error = null);
+    // Kick off the connection in the background so the connected-dot
+    // updates while the user is already inside the shell.
+    final mgr = ref.read(connectionManagerProvider);
+    if (mgr.stateFor(widget.profile.id) != SshConnectionState.connected) {
+      mgr.connect(widget.profile.id).catchError((e, _) {
+        if (mounted) setState(() => _error = e.toString());
+        // Returning a no-op object satisfies the Future type — the error
+        // is already surfaced on the tile.
+        return mgr.connectionFor(widget.profile.id)!;
+      });
     }
-  }
-
-  void _open() {
     context.push('/server/${widget.profile.id}');
   }
 
@@ -181,7 +178,7 @@ class _ServerTileState extends ConsumerState<_ServerTile> {
     final connected = connState == SshConnectionState.connected;
 
     return AkariyuCard(
-      onTap: connected ? _open : _connect,
+      onTap: _openShell,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -237,10 +234,6 @@ class _ServerTileState extends ConsumerState<_ServerTile> {
               ),
             ),
           ],
-          if (_busy) ...[
-            const SizedBox(height: 12),
-            const LinearProgressIndicator(minHeight: 2),
-          ],
         ],
       ),
     );
@@ -263,13 +256,13 @@ class _ServerTileState extends ConsumerState<_ServerTile> {
   String _labelFor(SshConnectionState s) {
     switch (s) {
       case SshConnectionState.disconnected:
-        return 'Tap to connect';
+        return 'Tap to open';
       case SshConnectionState.connecting:
         return 'Connecting…';
       case SshConnectionState.reconnecting:
         return 'Reconnecting…';
       case SshConnectionState.connected:
-        return 'Connected — tap to open';
+        return 'Connected';
       case SshConnectionState.error:
         return 'Connection error — tap to retry';
     }

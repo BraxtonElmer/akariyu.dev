@@ -37,12 +37,23 @@ class _ClaudeSessionsScreenState extends ConsumerState<ClaudeSessionsScreen> {
       encodedDirName: widget.encodedDirName,
     );
     final sessions = ref.watch(claudeSessionsProvider(key));
-    final project = ClaudeProject(
-      encodedDirName: widget.encodedDirName,
-      absoluteDir: '',
-      sessionCount: 0,
-      lastModified: null,
-    );
+    // Look up the cwd-enriched project from the cached projects list. If
+    // we synthesise a fresh ClaudeProject here, `cwd` is null and the
+    // displayPath falls back to a lossy `-` → `/` decode (which loses the
+    // dot in names like `akariyu.dev`).
+    final projects = ref.watch(claudeProjectsProvider(widget.serverId));
+    final project = projects.maybeWhen(
+          data: (list) => list
+              .where((p) => p.encodedDirName == widget.encodedDirName)
+              .firstOrNull,
+          orElse: () => null,
+        ) ??
+        ClaudeProject(
+          encodedDirName: widget.encodedDirName,
+          absoluteDir: '',
+          sessionCount: 0,
+          lastModified: null,
+        );
     return Scaffold(
       backgroundColor: AkariyuColors.backgroundBase,
       appBar: AppBar(
