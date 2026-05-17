@@ -29,11 +29,26 @@ class ClaudeChatScreen extends ConsumerStatefulWidget {
 
 class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
   final _scrollController = ScrollController();
+  bool _autoScrolledOnce = false;
 
   @override
   void dispose() {
     _scrollController.dispose();
     super.dispose();
+  }
+
+  void _scrollToBottom({bool jump = false}) {
+    if (!_scrollController.hasClients) return;
+    final max = _scrollController.position.maxScrollExtent;
+    if (jump) {
+      _scrollController.jumpTo(max);
+    } else {
+      _scrollController.animateTo(
+        max,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic,
+      );
+    }
   }
 
   @override
@@ -78,17 +93,35 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
                 ),
               );
             }
-            return Column(
+            if (!_autoScrolledOnce) {
+              _autoScrolledOnce = true;
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                _scrollToBottom(jump: true);
+              });
+            }
+            return Stack(
               children: [
-                Expanded(
-                  child: ListView.builder(
+                Column(
+                  children: [
+                    Expanded(
+                      child: ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
+                        itemCount: visible.length,
+                        itemBuilder: (_, i) => _MessageBubble(visible[i]),
+                      ),
+                    ),
+                    _ReadOnlyBanner(),
+                  ],
+                ),
+                Positioned(
+                  right: 12,
+                  bottom: 56,
+                  child: _ScrollToBottomFab(
                     controller: _scrollController,
-                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
-                    itemCount: visible.length,
-                    itemBuilder: (_, i) => _MessageBubble(visible[i]),
+                    onTap: () => _scrollToBottom(),
                   ),
                 ),
-                _ReadOnlyBanner(),
               ],
             );
           },
@@ -448,6 +481,71 @@ class _ImageBlock extends StatelessWidget {
           const SizedBox(width: 8),
           Text('Image ($mediaType)', style: AkariyuTypography.bodySmall),
         ],
+      ),
+    );
+  }
+}
+
+/// Floating "scroll to bottom" button that appears when the user has
+/// scrolled up enough to lose sight of the last message.
+class _ScrollToBottomFab extends StatefulWidget {
+  const _ScrollToBottomFab({required this.controller, required this.onTap});
+
+  final ScrollController controller;
+  final VoidCallback onTap;
+
+  @override
+  State<_ScrollToBottomFab> createState() => _ScrollToBottomFabState();
+}
+
+class _ScrollToBottomFabState extends State<_ScrollToBottomFab> {
+  bool _visible = false;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onScroll);
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!widget.controller.hasClients) return;
+    final pos = widget.controller.position;
+    final distanceFromBottom = pos.maxScrollExtent - pos.pixels;
+    final shouldShow = distanceFromBottom > 240;
+    if (shouldShow != _visible) {
+      setState(() => _visible = shouldShow);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedOpacity(
+      opacity: _visible ? 1 : 0,
+      duration: const Duration(milliseconds: 180),
+      child: IgnorePointer(
+        ignoring: !_visible,
+        child: Material(
+          color: AkariyuColors.surfaceCard,
+          shape: const CircleBorder(
+            side: BorderSide(color: AkariyuColors.borderSubtle),
+          ),
+          child: InkWell(
+            onTap: widget.onTap,
+            customBorder: const CircleBorder(),
+            child: const SizedBox(
+              width: 40,
+              height: 40,
+              child: Icon(Icons.arrow_downward,
+                  size: 18, color: AkariyuColors.textSecondary),
+            ),
+          ),
+        ),
       ),
     );
   }

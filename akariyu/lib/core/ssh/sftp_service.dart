@@ -174,6 +174,23 @@ class SftpService {
     }
   }
 
+  /// Read the first [maxBytes] of [path] as UTF-8 text. Unlike [readText],
+  /// this never throws "file too big" — it just truncates. Useful for
+  /// peeking at the first line of a large file.
+  Future<String> readTextHead(String path, {int maxBytes = 8 * 1024}) async {
+    try {
+      final file = await _client.open(path, mode: SftpFileOpenMode.read);
+      try {
+        final bytes = await file.readBytes(length: maxBytes);
+        return utf8.decode(bytes, allowMalformed: true);
+      } finally {
+        await file.close();
+      }
+    } on SftpStatusError catch (e) {
+      throw SftpException(e.message);
+    }
+  }
+
   /// Overwrite [path] with [contents], creating it if needed.
   Future<void> writeText(String path, String contents) async {
     try {

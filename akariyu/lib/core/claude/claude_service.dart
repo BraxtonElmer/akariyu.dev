@@ -63,17 +63,25 @@ class ClaudeService {
       }
       final sessions = files.where((f) => f.name.endsWith('.jsonl')).toList();
       DateTime? newest;
+      FsEntry? newestEntry;
       for (final s in sessions) {
         if (s.modifiedAt == null) continue;
         if (newest == null || s.modifiedAt!.isAfter(newest)) {
           newest = s.modifiedAt;
+          newestEntry = s;
         }
       }
+      // Peek into the newest session for the authoritative `cwd` — the
+      // encoded dir name replaces both `/` and `.` with `-`, so we can't
+      // reliably reverse it without help.
+      final cwd = await _peekCwd(newestEntry ??
+          (sessions.isEmpty ? null : sessions.first));
       projects.add(ClaudeProject(
         encodedDirName: d.name,
         absoluteDir: d.path,
         sessionCount: sessions.length,
         lastModified: newest ?? d.modifiedAt,
+        cwd: cwd,
       ));
     }
 
@@ -141,5 +149,25 @@ class ClaudeService {
       {int maxBytes = 4 * 1024 * 1024}) async {
     final body = await sftp.readText(absolutePath, maxBytes: maxBytes);
     return ClaudeJsonlParser.parseAll(body);
+  }
+
+  /// Pull `cwd` from the first JSONL line of [entry], if possible. Used by
+  /// [listProjects] to get an accurate project path without reading every
+  /// session in full.
+  Future<String?> _peekCwd(FsEntry? entry) async {
+    if (entry == null) return null;
+    try {
+      // First line is typically <2 KB. Read a small slice to keep this
+      // cheap even for huge sessions.
+      final body = await sftp.readTextHead(entry.path, maxBytes: 8 * 1024);
+      final newline = body.indexOf('\n');
+      final firstLine = newline >= 0 ? body.substring(0, newline) : body;
+      final msg = ClaudeJsonlParser.parseLine(firstLine);
+      final cwd = msg?.cwd;
+      if (cwd != null && cwd.isNotEmpty) return cwd;
+    } catch (_) {
+      // Best-effort — fall through to dir-name decoding.
+    }
+    return null;
   }
 }

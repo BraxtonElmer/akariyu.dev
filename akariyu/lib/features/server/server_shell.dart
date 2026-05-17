@@ -66,8 +66,8 @@ class _ServerShellState extends ConsumerState<ServerShell> {
             label: 'Home',
           ),
           NavigationDestination(
-            icon: Icon(Icons.auto_awesome_outlined),
-            selectedIcon: Icon(Icons.auto_awesome),
+            icon: Icon(Icons.chat_bubble_outline),
+            selectedIcon: Icon(Icons.chat_bubble),
             label: 'Claude',
           ),
           NavigationDestination(
@@ -259,7 +259,8 @@ class _QuickActions extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        _tile(Icons.auto_awesome, 'Claude', () => onGoTab(ServerTab.claude)),
+        _tile(Icons.chat_bubble_outline, 'Claude',
+            () => onGoTab(ServerTab.claude)),
         const SizedBox(width: 12),
         _tile(Icons.folder_open, 'Files', () => onGoTab(ServerTab.files)),
         const SizedBox(width: 12),

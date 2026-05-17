@@ -11,6 +11,7 @@ class ClaudeProject {
     required this.absoluteDir,
     required this.sessionCount,
     required this.lastModified,
+    this.cwd,
   });
 
   /// Raw directory name on disk, e.g. `-home-elmer-projects-akariyu.dev`.
@@ -25,9 +26,15 @@ class ClaudeProject {
   /// Newest mtime across the sessions, for sorting "most recently used".
   final DateTime? lastModified;
 
-  /// Best-effort decode for display. May be wrong when the project path
-  /// itself contains hyphens.
+  /// Actual working directory of this project, read from any session's
+  /// `cwd` field. Authoritative — the directory name itself encodes both
+  /// `/` and `.` as `-`, which is irreversibly ambiguous.
+  final String? cwd;
+
+  /// Path to display in the UI. Prefers the JSONL `cwd` (always accurate)
+  /// and falls back to a best-effort decode of the dir name.
   String get displayPath {
+    if (cwd != null && cwd!.isNotEmpty) return cwd!;
     if (encodedDirName.isEmpty) return encodedDirName;
     final body = encodedDirName.startsWith('-')
         ? encodedDirName.substring(1)
