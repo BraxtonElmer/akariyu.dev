@@ -30,9 +30,16 @@ dependencies:
   # Fonts
   google_fonts: ^6.2.1
 
+  # Terminal emulation
+  xterm: ^4.0.0
+
+  # Syntax highlighting (read-only display)
+  flutter_highlight: ^0.7.0
+
   # Utilities
   uuid: ^4.5.1
   intl: ^0.20.1
+  path: ^1.9.0
 
 dev_dependencies:
   flutter_test:

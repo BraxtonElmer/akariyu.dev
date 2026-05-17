@@ -3,10 +3,12 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'auth/biometric_service.dart';
+import 'ssh/sftp_service.dart';
 import 'ssh/ssh_models.dart';
 import 'ssh/ssh_service.dart';
 import 'storage/secure_storage.dart';
 import 'storage/server_repository.dart';
+import 'tmux/terminal_session.dart';
 
 /// Root provider for secure storage. Overridden in tests with the in-memory impl.
 final secureStorageProvider = Provider<SecureStorageService>((ref) {
@@ -153,3 +155,89 @@ final connectionStateProvider =
       .map((m) => m[id] ?? SshConnectionState.disconnected)
       .distinct();
 });
+
+/// Opens an [SftpService] over the currently-active SSH connection for
+/// server [id]. Auto-connects if needed. The service is auto-disposed when
+/// the screen using it unmounts.
+final sftpServiceProvider =
+    FutureProvider.autoDispose.family<SftpService, String>((ref, id) async {
+  final mgr = ref.read(connectionManagerProvider);
+  final conn = mgr.connectionFor(id) ?? await mgr.connect(id);
+  final service = await SftpService.open(conn);
+  ref.onDispose(service.close);
+  return service;
+});
+
+/// Directory listing for ([serverId], absolutePath). Cached by Riverpod —
+/// the file explorer calls `ref.invalidate` on pull-to-refresh.
+final directoryListingProvider = FutureProvider.autoDispose
+    .family<List<FsEntry>, DirectoryListingKey>((ref, key) async {
+  final sftp = await ref.watch(sftpServiceProvider(key.serverId).future);
+  return sftp.listDirectory(key.path);
+});
+
+class DirectoryListingKey {
+  const DirectoryListingKey({required this.serverId, required this.path});
+  final String serverId;
+  final String path;
+
+  @override
+  bool operator ==(Object other) =>
+      other is DirectoryListingKey &&
+      other.serverId == serverId &&
+      other.path == path;
+  @override
+  int get hashCode => Object.hash(serverId, path);
+}
+
+/// Resolves the user's home directory on the server (used as default root
+/// for the file explorer). Cached for the connection lifetime.
+final homeDirectoryProvider =
+    FutureProvider.autoDispose.family<String, String>((ref, serverId) async {
+  final sftp = await ref.watch(sftpServiceProvider(serverId).future);
+  return sftp.resolveAbsolute('.');
+});
+
+/// Multi-tab terminal state, keyed by server id.
+final terminalTabsProvider = NotifierProvider.family<TerminalTabsNotifier,
+    List<TerminalSession>, String>(TerminalTabsNotifier.new);
+
+class TerminalTabsNotifier
+    extends FamilyNotifier<List<TerminalSession>, String> {
+  @override
+  List<TerminalSession> build(String serverId) => const [];
+
+  Future<TerminalSession> open({String? cwd, String? title}) async {
+    final mgr = ref.read(connectionManagerProvider);
+    final conn = mgr.connectionFor(arg) ?? await mgr.connect(arg);
+    final session = await TerminalSession.start(
+      conn: conn,
+      title: title ?? 'shell ${state.length + 1}',
+      cwd: cwd,
+    );
+    state = [...state, session];
+    return session;
+  }
+
+  Future<void> closeTab(String id, {bool killTmux = false}) async {
+    final session = state.firstWhere(
+      (s) => s.id == id,
+      orElse: () => throw StateError('No terminal $id'),
+    );
+    final mgr = ref.read(connectionManagerProvider);
+    final conn = mgr.connectionFor(arg);
+    if (killTmux && conn != null) {
+      await session.kill(conn);
+    } else {
+      await session.detach();
+    }
+    state = state.where((s) => s.id != id).toList();
+  }
+
+  Future<void> closeAll() async {
+    for (final s in state) {
+      await s.detach();
+    }
+    state = const [];
+  }
+}

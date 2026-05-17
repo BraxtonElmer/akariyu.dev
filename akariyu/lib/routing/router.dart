@@ -2,10 +2,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../core/providers.dart';
+import '../features/files/file_editor_screen.dart';
 import '../features/home/home_screen.dart';
 import '../features/onboarding/add_server_screen.dart';
 import '../features/onboarding/lock_screen.dart';
 import '../features/onboarding/welcome_screen.dart';
+import '../features/server/server_shell.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
@@ -31,6 +33,32 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/server/:id/edit',
         builder: (_, state) =>
             AddServerScreen(existingId: state.pathParameters['id']),
+      ),
+      GoRoute(
+        path: '/server/:id',
+        builder: (_, state) =>
+            ServerShell(serverId: state.pathParameters['id']!),
+      ),
+      GoRoute(
+        path: '/server/:id/files',
+        builder: (_, state) => ServerShell(
+          serverId: state.pathParameters['id']!,
+          initialTab: ServerTab.files,
+        ),
+      ),
+      GoRoute(
+        path: '/server/:id/terminal',
+        builder: (_, state) => ServerShell(
+          serverId: state.pathParameters['id']!,
+          initialTab: ServerTab.terminal,
+        ),
+      ),
+      GoRoute(
+        path: '/server/:id/files/edit',
+        builder: (_, state) => FileEditorScreen(
+          serverId: state.pathParameters['id']!,
+          path: state.uri.queryParameters['path'] ?? '/',
+        ),
       ),
     ],
     redirect: (context, state) {

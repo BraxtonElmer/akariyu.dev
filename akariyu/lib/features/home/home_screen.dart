@@ -113,7 +113,7 @@ class _ServerTileState extends ConsumerState<_ServerTile> {
   bool _busy = false;
   String? _error;
 
-  Future<void> _connect() async {
+  Future<void> _connect({bool openShell = true}) async {
     HapticFeedback.lightImpact();
     setState(() {
       _busy = true;
@@ -121,11 +121,19 @@ class _ServerTileState extends ConsumerState<_ServerTile> {
     });
     try {
       await ref.read(connectionManagerProvider).connect(widget.profile.id);
+      if (!mounted) return;
+      if (openShell) {
+        await context.push('/server/${widget.profile.id}');
+      }
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  void _open() {
+    context.push('/server/${widget.profile.id}');
   }
 
   Future<void> _disconnect() async {
@@ -173,7 +181,7 @@ class _ServerTileState extends ConsumerState<_ServerTile> {
     final connected = connState == SshConnectionState.connected;
 
     return AkariyuCard(
-      onTap: connected ? null : _connect,
+      onTap: connected ? _open : _connect,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -261,7 +269,7 @@ class _ServerTileState extends ConsumerState<_ServerTile> {
       case SshConnectionState.reconnecting:
         return 'Reconnecting…';
       case SshConnectionState.connected:
-        return 'Connected';
+        return 'Connected — tap to open';
       case SshConnectionState.error:
         return 'Connection error — tap to retry';
     }
