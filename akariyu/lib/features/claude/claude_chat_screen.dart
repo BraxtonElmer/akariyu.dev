@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../core/claude/claude_live_session.dart';
 import '../../core/claude/claude_models.dart';
@@ -441,6 +443,241 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
     }
   }
 
+  /// Bottom-sheet picker for adding an `@<path>` reference to the input.
+  /// Camera/gallery/device-file → upload to server then mention. Server
+  /// path → just mention it directly.
+  Future<void> _openAttachSheet() async {
+    final source = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AkariyuColors.surfaceElevated,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: AkariyuColors.borderSubtle,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text('Attach',
+                  style: AkariyuTypography.headlineLarge),
+              const SizedBox(height: 4),
+              Text(
+                'Files are uploaded to ~/.claude/akariyu-uploads/ on the '
+                'server and referenced as @<path> in your message — '
+                'Claude reads them natively.',
+                style: AkariyuTypography.bodySmall,
+              ),
+              const SizedBox(height: 20),
+              _AuthOptionTile(
+                icon: Icons.photo_camera_outlined,
+                label: 'Take photo',
+                detail: 'Open the camera and attach the shot.',
+                onTap: () => Navigator.pop(ctx, 'camera'),
+              ),
+              const SizedBox(height: 10),
+              _AuthOptionTile(
+                icon: Icons.photo_library_outlined,
+                label: 'Photo from gallery',
+                detail: 'Pick an image from your device.',
+                onTap: () => Navigator.pop(ctx, 'gallery'),
+              ),
+              const SizedBox(height: 10),
+              _AuthOptionTile(
+                icon: Icons.attach_file_outlined,
+                label: 'File from device',
+                detail: 'Any file from your phone storage.',
+                onTap: () => Navigator.pop(ctx, 'device'),
+              ),
+              const SizedBox(height: 10),
+              _AuthOptionTile(
+                icon: Icons.dns_outlined,
+                label: 'File on server',
+                detail:
+                    'Reference an existing path. Use the Files tab to '
+                    'browse + copy path.',
+                onTap: () => Navigator.pop(ctx, 'server'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (source == null || !mounted) return;
+    switch (source) {
+      case 'camera':
+        await _attachFromImagePicker(ImageSource.camera);
+        break;
+      case 'gallery':
+        await _attachFromImagePicker(ImageSource.gallery);
+        break;
+      case 'device':
+        await _attachFromDeviceFile();
+        break;
+      case 'server':
+        await _attachFromServerPath();
+        break;
+    }
+  }
+
+  Future<void> _attachFromImagePicker(ImageSource src) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: src,
+        imageQuality: 88,
+      );
+      if (picked == null) return;
+      final bytes = await picked.readAsBytes();
+      await _uploadAndMention(bytes: bytes, fileName: picked.name);
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Attach failed: $e')));
+    }
+  }
+
+  Future<void> _attachFromDeviceFile() async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        withData: true,
+        allowMultiple: false,
+      );
+      final file = result?.files.firstOrNull;
+      if (file == null) return;
+      final bytes = file.bytes;
+      if (bytes == null) {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Could not read file bytes')),
+        );
+        return;
+      }
+      await _uploadAndMention(bytes: bytes, fileName: file.name);
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Attach failed: $e')));
+    }
+  }
+
+  Future<void> _attachFromServerPath() async {
+    final ctrl = TextEditingController();
+    final path = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AkariyuColors.surfaceElevated,
+        title: Text('Reference server file',
+            style: AkariyuTypography.titleLarge),
+        content: SizedBox(
+          width: 360,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Absolute path. Tip: long-press a file in the Files '
+                'tab → Copy path.',
+                style: AkariyuTypography.bodySmall,
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: ctrl,
+                autofocus: true,
+                style: AkariyuTypography.mono,
+                cursorColor: AkariyuColors.accent,
+                decoration: const InputDecoration(hintText: '/home/me/foo.md'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: Text('Attach',
+                style: TextStyle(color: AkariyuColors.accent)),
+          ),
+        ],
+      ),
+    );
+    ctrl.dispose();
+    if (path == null || path.isEmpty) return;
+    _insertMention(path);
+  }
+
+  Future<void> _uploadAndMention({
+    required Uint8List bytes,
+    required String fileName,
+  }) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final overlay = _showUploadingSnack(messenger, fileName);
+    try {
+      final live = await ref.read(claudeLiveSessionProvider(_liveKey).future);
+      final remotePath =
+          await live.uploadAttachment(bytes: bytes, fileName: fileName);
+      overlay.close();
+      _insertMention(remotePath);
+      messenger.showSnackBar(
+        SnackBar(content: Text('Attached $fileName')),
+      );
+    } catch (e) {
+      overlay.close();
+      messenger.showSnackBar(SnackBar(content: Text('Upload failed: $e')));
+    }
+  }
+
+  ScaffoldFeatureController _showUploadingSnack(
+    ScaffoldMessengerState messenger,
+    String fileName,
+  ) {
+    return messenger.showSnackBar(SnackBar(
+      duration: const Duration(minutes: 5),
+      content: Row(
+        children: [
+          const SizedBox(
+            width: 14,
+            height: 14,
+            child:
+                CircularProgressIndicator(strokeWidth: 2),
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Text('Uploading $fileName…')),
+        ],
+      ),
+    ));
+  }
+
+  /// Inject `@<path>` at the input field's cursor. Adds a leading/
+  /// trailing space so it doesn't collide with surrounding text.
+  void _insertMention(String path) {
+    final controller = _inputController;
+    final sel = controller.selection;
+    final text = controller.text;
+    final mention = '@$path ';
+    final start = sel.isValid ? sel.start : text.length;
+    final end = sel.isValid ? sel.end : text.length;
+    final needsSpaceBefore =
+        start > 0 && !RegExp(r'\s').hasMatch(text[start - 1]);
+    final inserted = (needsSpaceBefore ? ' ' : '') + mention;
+    final newText = text.replaceRange(start, end, inserted);
+    controller.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(
+        offset: start + inserted.length,
+      ),
+    );
+    _inputFocus.requestFocus();
+  }
+
   Future<void> _openSettings() async {
     final current = ref.read(claudeSendConfigProvider).valueOrNull ??
         const ClaudeSendConfig();
@@ -524,6 +761,7 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
                       focusNode: _inputFocus,
                       busy: _waiting,
                       onSend: _send,
+                      onAttach: _openAttachSheet,
                     ),
                   ],
                 ),
@@ -659,11 +897,31 @@ class _SendConfigSheetState extends State<_SendConfigSheet> {
     text: widget.initial.appendSystemPrompt,
   );
   late bool _verbose = widget.initial.verbose;
+  late final _allowedCtrl =
+      TextEditingController(text: widget.initial.allowedTools);
+  late final _disallowedCtrl =
+      TextEditingController(text: widget.initial.disallowedTools);
+  late final _addDirsCtrl =
+      TextEditingController(text: widget.initial.addDirs);
+  late final _mcpCtrl =
+      TextEditingController(text: widget.initial.mcpConfig);
+  late bool _strictMcp = widget.initial.strictMcpConfig;
+  late bool _skipPerms = widget.initial.dangerouslySkipPermissions;
+  late final _settingsPathCtrl =
+      TextEditingController(text: widget.initial.settingsPath);
+  late final _rawArgsCtrl =
+      TextEditingController(text: widget.initial.rawExtraArgs);
 
   @override
   void dispose() {
     _maxTurnsCtrl.dispose();
     _appendCtrl.dispose();
+    _allowedCtrl.dispose();
+    _disallowedCtrl.dispose();
+    _addDirsCtrl.dispose();
+    _mcpCtrl.dispose();
+    _settingsPathCtrl.dispose();
+    _rawArgsCtrl.dispose();
     super.dispose();
   }
 
@@ -692,6 +950,14 @@ class _SendConfigSheetState extends State<_SendConfigSheet> {
       maxTurns: parsed,
       appendSystemPrompt: _appendCtrl.text.trim(),
       verbose: _verbose,
+      allowedTools: _allowedCtrl.text.trim(),
+      disallowedTools: _disallowedCtrl.text.trim(),
+      addDirs: _addDirsCtrl.text.trim(),
+      mcpConfig: _mcpCtrl.text.trim(),
+      strictMcpConfig: _strictMcp,
+      dangerouslySkipPermissions: _skipPerms,
+      settingsPath: _settingsPathCtrl.text.trim(),
+      rawExtraArgs: _rawArgsCtrl.text.trim(),
     );
   }
 
@@ -776,7 +1042,114 @@ class _SendConfigSheetState extends State<_SendConfigSheet> {
                 activeThumbColor: AkariyuColors.accent,
                 contentPadding: EdgeInsets.zero,
               ),
+              SwitchListTile.adaptive(
+                value: _skipPerms,
+                onChanged: (v) => setState(() => _skipPerms = v),
+                title: Text('Dangerously skip permissions',
+                    style: AkariyuTypography.bodyLarge),
+                subtitle: Text(
+                  '--dangerously-skip-permissions. Equivalent to bypass '
+                  'mode. Don\'t use this on production servers.',
+                  style: AkariyuTypography.bodySmall,
+                ),
+                activeThumbColor: AkariyuColors.error,
+                contentPadding: EdgeInsets.zero,
+              ),
               const SizedBox(height: 12),
+              _sectionLabel('Allowed tools'),
+              const SizedBox(height: 8),
+              AkariyuTextField(
+                controller: _allowedCtrl,
+                hint: 'Read,Bash,Edit',
+                helper: 'Comma-separated. Blank = Claude decides.',
+              ),
+              const SizedBox(height: 16),
+              _sectionLabel('Disallowed tools'),
+              const SizedBox(height: 8),
+              AkariyuTextField(
+                controller: _disallowedCtrl,
+                hint: 'Bash,Write',
+                helper: 'Tools Claude must never use.',
+              ),
+              const SizedBox(height: 16),
+              _sectionLabel('Additional directories'),
+              const SizedBox(height: 8),
+              AkariyuTextField(
+                controller: _addDirsCtrl,
+                hint: '/home/me/other-project, /tmp/scratch',
+                helper:
+                    'Comma-separated absolute paths. Each becomes --add-dir.',
+              ),
+              const SizedBox(height: 16),
+              _sectionLabel('MCP config'),
+              const SizedBox(height: 8),
+              AkariyuTextField(
+                controller: _mcpCtrl,
+                hint: '/home/me/.claude/mcp.json',
+                helper: 'Path to MCP servers config. Blank = use default.',
+              ),
+              const SizedBox(height: 8),
+              SwitchListTile.adaptive(
+                value: _strictMcp,
+                onChanged: (v) => setState(() => _strictMcp = v),
+                title: Text('Strict MCP', style: AkariyuTypography.bodyLarge),
+                subtitle: Text(
+                  '--strict-mcp-config. Fail send if any MCP server in '
+                  'the config can\'t start.',
+                  style: AkariyuTypography.bodySmall,
+                ),
+                activeThumbColor: AkariyuColors.accent,
+                contentPadding: EdgeInsets.zero,
+              ),
+              const SizedBox(height: 12),
+              _sectionLabel('settings.json path'),
+              const SizedBox(height: 8),
+              AkariyuTextField(
+                controller: _settingsPathCtrl,
+                hint: '~/.claude/settings.json',
+                helper: 'Override the settings.json claude reads. Blank '
+                    '= default.',
+              ),
+              const SizedBox(height: 16),
+              _sectionLabel('Raw extra args'),
+              const SizedBox(height: 8),
+              AkariyuTextField(
+                controller: _rawArgsCtrl,
+                hint: '--input-format text --output-format text',
+                helper: 'Appended verbatim to the claude command. Use for '
+                    'anything not covered above. You quote it yourself.',
+                minLines: 1,
+                maxLines: 3,
+                monospace: true,
+              ),
+              const SizedBox(height: 20),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: AkariyuColors.surfaceCard.withValues(alpha: 0.4),
+                  borderRadius: BorderRadius.circular(10),
+                  border:
+                      Border.all(color: AkariyuColors.borderSubtle),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.info_outline,
+                        size: 14, color: AkariyuColors.textTertiary),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'For knobs that aren\'t CLI flags — thinking '
+                        'budget, env vars, model aliases — edit your '
+                        'server\'s ~/.claude/settings.json directly via '
+                        'the Files tab.',
+                        style: AkariyuTypography.bodySmall,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
               AkariyuButton(
                 label: 'Save',
                 fullWidth: true,
@@ -862,12 +1235,14 @@ class _InputBar extends StatelessWidget {
     required this.focusNode,
     required this.busy,
     required this.onSend,
+    required this.onAttach,
   });
 
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool busy;
   final VoidCallback onSend;
+  final VoidCallback onAttach;
 
   @override
   Widget build(BuildContext context) {
@@ -884,6 +1259,8 @@ class _InputBar extends StatelessWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
+              _AttachButton(onTap: busy ? null : onAttach),
+              const SizedBox(width: 6),
               Expanded(
                 child: Container(
                   decoration: BoxDecoration(
@@ -922,6 +1299,36 @@ class _InputBar extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _AttachButton extends StatelessWidget {
+  const _AttachButton({required this.onTap});
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AkariyuColors.surfaceCard,
+      shape: const CircleBorder(
+        side: BorderSide(color: AkariyuColors.borderSubtle),
+      ),
+      child: InkWell(
+        onTap: onTap,
+        customBorder: const CircleBorder(),
+        child: SizedBox(
+          width: 44,
+          height: 44,
+          child: Icon(
+            Icons.add,
+            size: 22,
+            color: onTap == null
+                ? AkariyuColors.textTertiary
+                : AkariyuColors.textPrimary,
+          ),
+        ),
       ),
     );
   }

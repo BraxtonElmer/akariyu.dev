@@ -210,6 +210,35 @@ class SftpService {
     }
   }
 
+  /// Binary equivalent of [writeText] — used for image/file uploads.
+  /// Files larger than ~4 MB get streamed in chunks to keep the
+  /// memory profile sane on mobile.
+  Future<void> writeBytes(String path, Uint8List bytes) async {
+    try {
+      final file = await _client.open(
+        path,
+        mode: SftpFileOpenMode.create |
+            SftpFileOpenMode.write |
+            SftpFileOpenMode.truncate,
+      );
+      try {
+        const chunk = 64 * 1024;
+        for (var offset = 0; offset < bytes.length; offset += chunk) {
+          final end =
+              (offset + chunk > bytes.length) ? bytes.length : offset + chunk;
+          await file.writeBytes(
+            Uint8List.sublistView(bytes, offset, end),
+            offset: offset,
+          );
+        }
+      } finally {
+        await file.close();
+      }
+    } on SftpStatusError catch (e) {
+      throw SftpException(e.message);
+    }
+  }
+
   /// True if [path] exists on the server (file, directory, symlink, …).
   /// Implemented via SFTP stat so we don't depend on shell semantics.
   Future<bool> exists(String path) async {

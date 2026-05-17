@@ -10,7 +10,9 @@ void _log(String msg) {
   if (kDebugMode) print('[akariyu.claude] $msg');
 }
 
-/// User-facing config knobs for a single send.
+/// User-facing config knobs for a single send. Maps roughly 1:1 to
+/// `claude --help` flags. Anything not enumerated here can still be
+/// passed via [rawExtraArgs].
 class ClaudeSendConfig {
   const ClaudeSendConfig({
     this.model = 'default',
@@ -18,6 +20,14 @@ class ClaudeSendConfig {
     this.maxTurns,
     this.appendSystemPrompt = '',
     this.verbose = false,
+    this.allowedTools = '',
+    this.disallowedTools = '',
+    this.addDirs = '',
+    this.mcpConfig = '',
+    this.strictMcpConfig = false,
+    this.dangerouslySkipPermissions = false,
+    this.settingsPath = '',
+    this.rawExtraArgs = '',
   });
 
   /// `default`, `opus`, `sonnet`, `haiku`, or a fully-qualified model id
@@ -36,8 +46,39 @@ class ClaudeSendConfig {
   /// Empty = no addition.
   final String appendSystemPrompt;
 
-  /// Pass `--verbose` to the CLI. Useful when debugging.
+  /// Pass `--verbose` to the CLI.
   final bool verbose;
+
+  /// Comma-separated tool names that Claude is allowed to use
+  /// (e.g. `Read,Bash`). Maps to `--allowed-tools`.
+  final String allowedTools;
+
+  /// Comma-separated tool names Claude must not use. Maps to
+  /// `--disallowed-tools`.
+  final String disallowedTools;
+
+  /// Comma-separated absolute paths added as additional working dirs.
+  /// Maps to repeated `--add-dir` flags.
+  final String addDirs;
+
+  /// Path to an MCP servers config (JSON). Maps to `--mcp-config`.
+  final String mcpConfig;
+
+  /// `--strict-mcp-config` — error out if any MCP server in [mcpConfig]
+  /// can't be started.
+  final bool strictMcpConfig;
+
+  /// `--dangerously-skip-permissions`. Equivalent to permission mode
+  /// `bypassPermissions` but using the more explicit flag.
+  final bool dangerouslySkipPermissions;
+
+  /// Path to an alternate `settings.json`. Maps to `--settings`.
+  final String settingsPath;
+
+  /// Free-form raw flags appended verbatim. Use for anything not
+  /// enumerated above (`--input-format`, future flags, …). User is
+  /// responsible for shell-safe quoting.
+  final String rawExtraArgs;
 
   ClaudeSendConfig copyWith({
     String? model,
@@ -46,6 +87,14 @@ class ClaudeSendConfig {
     bool clearMaxTurns = false,
     String? appendSystemPrompt,
     bool? verbose,
+    String? allowedTools,
+    String? disallowedTools,
+    String? addDirs,
+    String? mcpConfig,
+    bool? strictMcpConfig,
+    bool? dangerouslySkipPermissions,
+    String? settingsPath,
+    String? rawExtraArgs,
   }) =>
       ClaudeSendConfig(
         model: model ?? this.model,
@@ -53,6 +102,15 @@ class ClaudeSendConfig {
         maxTurns: clearMaxTurns ? null : (maxTurns ?? this.maxTurns),
         appendSystemPrompt: appendSystemPrompt ?? this.appendSystemPrompt,
         verbose: verbose ?? this.verbose,
+        allowedTools: allowedTools ?? this.allowedTools,
+        disallowedTools: disallowedTools ?? this.disallowedTools,
+        addDirs: addDirs ?? this.addDirs,
+        mcpConfig: mcpConfig ?? this.mcpConfig,
+        strictMcpConfig: strictMcpConfig ?? this.strictMcpConfig,
+        dangerouslySkipPermissions:
+            dangerouslySkipPermissions ?? this.dangerouslySkipPermissions,
+        settingsPath: settingsPath ?? this.settingsPath,
+        rawExtraArgs: rawExtraArgs ?? this.rawExtraArgs,
       );
 
   Map<String, dynamic> toJson() => {
@@ -61,6 +119,14 @@ class ClaudeSendConfig {
         'maxTurns': maxTurns,
         'appendSystemPrompt': appendSystemPrompt,
         'verbose': verbose,
+        'allowedTools': allowedTools,
+        'disallowedTools': disallowedTools,
+        'addDirs': addDirs,
+        'mcpConfig': mcpConfig,
+        'strictMcpConfig': strictMcpConfig,
+        'dangerouslySkipPermissions': dangerouslySkipPermissions,
+        'settingsPath': settingsPath,
+        'rawExtraArgs': rawExtraArgs,
       };
 
   static ClaudeSendConfig fromJson(Map<String, dynamic> j) => ClaudeSendConfig(
@@ -69,6 +135,15 @@ class ClaudeSendConfig {
         maxTurns: (j['maxTurns'] as num?)?.toInt(),
         appendSystemPrompt: (j['appendSystemPrompt'] as String?) ?? '',
         verbose: (j['verbose'] as bool?) ?? false,
+        allowedTools: (j['allowedTools'] as String?) ?? '',
+        disallowedTools: (j['disallowedTools'] as String?) ?? '',
+        addDirs: (j['addDirs'] as String?) ?? '',
+        mcpConfig: (j['mcpConfig'] as String?) ?? '',
+        strictMcpConfig: (j['strictMcpConfig'] as bool?) ?? false,
+        dangerouslySkipPermissions:
+            (j['dangerouslySkipPermissions'] as bool?) ?? false,
+        settingsPath: (j['settingsPath'] as String?) ?? '',
+        rawExtraArgs: (j['rawExtraArgs'] as String?) ?? '',
       );
 
   String encode() => jsonEncode(toJson());
@@ -87,16 +162,32 @@ class ClaudeSendConfig {
       other.permissionMode == permissionMode &&
       other.maxTurns == maxTurns &&
       other.appendSystemPrompt == appendSystemPrompt &&
-      other.verbose == verbose;
+      other.verbose == verbose &&
+      other.allowedTools == allowedTools &&
+      other.disallowedTools == disallowedTools &&
+      other.addDirs == addDirs &&
+      other.mcpConfig == mcpConfig &&
+      other.strictMcpConfig == strictMcpConfig &&
+      other.dangerouslySkipPermissions == dangerouslySkipPermissions &&
+      other.settingsPath == settingsPath &&
+      other.rawExtraArgs == rawExtraArgs;
 
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
         model,
         permissionMode,
         maxTurns,
         appendSystemPrompt,
         verbose,
-      );
+        allowedTools,
+        disallowedTools,
+        addDirs,
+        mcpConfig,
+        strictMcpConfig,
+        dangerouslySkipPermissions,
+        settingsPath,
+        rawExtraArgs,
+      ]);
 }
 
 /// Result of a one-shot `claude -p` invocation.
@@ -172,6 +263,64 @@ class ClaudeLiveSession {
     }
     _shimPathCache = shimPath;
     return shimPath;
+  }
+
+  /// Read the current `~/.claude/settings.json` from the server. Returns
+  /// the raw JSON (or `null` if the file doesn't exist). Used by the
+  /// "Server settings" editor for knobs that aren't CLI flags
+  /// (thinking budget, env vars, model aliases, …).
+  Future<String?> readClaudeSettings() async {
+    final home = await sftp.resolveAbsolute('.');
+    final path = '$home/.claude/settings.json';
+    if (!await sftp.exists(path)) return null;
+    try {
+      return await sftp.readText(path, maxBytes: 256 * 1024);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Overwrite `~/.claude/settings.json` with [body]. Caller is
+  /// responsible for valid JSON.
+  Future<void> writeClaudeSettings(String body) async {
+    final home = await sftp.resolveAbsolute('.');
+    final dir = '$home/.claude';
+    if (!await sftp.exists(dir)) {
+      await sftp.mkdir(dir);
+    }
+    await sftp.writeText('$dir/settings.json', body);
+  }
+
+  /// Upload [bytes] into `~/.claude/akariyu-uploads/<ts>-<safeName>` on
+  /// the server and return the absolute path. The chat input layer turns
+  /// that path into an `@<path>` mention, which Claude Code expands
+  /// natively as a file reference.
+  Future<String> uploadAttachment({
+    required Uint8List bytes,
+    required String fileName,
+  }) async {
+    final home = await sftp.resolveAbsolute('.');
+    final dir = '$home/.claude/akariyu-uploads';
+    if (!await sftp.exists(dir)) {
+      // mkdir -p in two steps if .claude itself is missing.
+      if (!await sftp.exists('$home/.claude')) {
+        await sftp.mkdir('$home/.claude');
+      }
+      await sftp.mkdir(dir);
+    }
+    // Strip path separators / weird chars from the basename so we don't
+    // accidentally create nested dirs from a user-supplied filename.
+    final safe = fileName
+        .split('/')
+        .last
+        .split(r'\')
+        .last
+        .replaceAll(RegExp(r'[^A-Za-z0-9._-]+'), '_');
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    final path = '$dir/$stamp-$safe';
+    await sftp.writeBytes(path, bytes);
+    _log('uploadAttachment: $path (${bytes.length} bytes)');
+    return path;
   }
 
   /// Path on the server where the Anthropic API key (and any future
@@ -254,6 +403,36 @@ class ClaudeLiveSession {
       );
     }
     if (config.verbose) flags.write('--verbose ');
+    if (config.allowedTools.trim().isNotEmpty) {
+      flags.write('--allowed-tools ${_sh(config.allowedTools.trim())} ');
+    }
+    if (config.disallowedTools.trim().isNotEmpty) {
+      flags.write(
+        '--disallowed-tools ${_sh(config.disallowedTools.trim())} ',
+      );
+    }
+    if (config.addDirs.trim().isNotEmpty) {
+      for (final dir in config.addDirs
+          .split(',')
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)) {
+        flags.write('--add-dir ${_sh(dir)} ');
+      }
+    }
+    if (config.mcpConfig.trim().isNotEmpty) {
+      flags.write('--mcp-config ${_sh(config.mcpConfig.trim())} ');
+    }
+    if (config.strictMcpConfig) flags.write('--strict-mcp-config ');
+    if (config.dangerouslySkipPermissions) {
+      flags.write('--dangerously-skip-permissions ');
+    }
+    if (config.settingsPath.trim().isNotEmpty) {
+      flags.write('--settings ${_sh(config.settingsPath.trim())} ');
+    }
+    if (config.rawExtraArgs.trim().isNotEmpty) {
+      // Trust the user — they're the ones typing the args.
+      flags.write('${config.rawExtraArgs.trim()} ');
+    }
 
     // The shim itself sources nvm + sets PATH + sources the API key
     // env file before exec'ing claude, so we can invoke it directly.
