@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'auth/biometric_service.dart';
+import 'claude/claude_models.dart';
+import 'claude/claude_service.dart';
 import 'ssh/sftp_service.dart';
 import 'ssh/ssh_models.dart';
 import 'ssh/ssh_service.dart';
@@ -200,6 +202,82 @@ final homeDirectoryProvider =
   final sftp = await ref.watch(sftpServiceProvider(serverId).future);
   return sftp.resolveAbsolute('.');
 });
+
+/// Long-lived [ClaudeService] for a given server. Backed by the same
+/// SFTP + SSH connections used elsewhere.
+final claudeServiceProvider =
+    FutureProvider.family<ClaudeService, String>((ref, serverId) async {
+  final mgr = ref.read(connectionManagerProvider);
+  final conn = mgr.connectionFor(serverId) ?? await mgr.connect(serverId);
+  final sftp = await ref.watch(sftpServiceProvider(serverId).future);
+  return ClaudeService(sftp: sftp, ssh: conn);
+});
+
+/// All projects under `~/.claude/projects/` on [serverId].
+final claudeProjectsProvider = FutureProvider.autoDispose
+    .family<List<ClaudeProject>, String>((ref, serverId) async {
+  final service = await ref.watch(claudeServiceProvider(serverId).future);
+  return service.listProjects();
+});
+
+/// Sessions inside one project, keyed by (serverId, encodedDirName).
+final claudeSessionsProvider = FutureProvider.autoDispose
+    .family<List<ClaudeSession>, ClaudeSessionsKey>((ref, key) async {
+  final service = await ref.watch(claudeServiceProvider(key.serverId).future);
+  final projects = await service.listProjects();
+  final project = projects.firstWhere(
+    (p) => p.encodedDirName == key.encodedDirName,
+    orElse: () => ClaudeProject(
+      encodedDirName: key.encodedDirName,
+      absoluteDir: '',
+      sessionCount: 0,
+      lastModified: null,
+    ),
+  );
+  if (project.absoluteDir.isEmpty) return const [];
+  return service.listSessions(project);
+});
+
+class ClaudeSessionsKey {
+  const ClaudeSessionsKey({
+    required this.serverId,
+    required this.encodedDirName,
+  });
+  final String serverId;
+  final String encodedDirName;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ClaudeSessionsKey &&
+      other.serverId == serverId &&
+      other.encodedDirName == encodedDirName;
+  @override
+  int get hashCode => Object.hash(serverId, encodedDirName);
+}
+
+/// Parsed message history for one session JSONL file.
+final claudeChatHistoryProvider = FutureProvider.autoDispose
+    .family<List<ClaudeMessage>, ClaudeChatKey>((ref, key) async {
+  final service = await ref.watch(claudeServiceProvider(key.serverId).future);
+  return service.readMessages(key.absolutePath);
+});
+
+class ClaudeChatKey {
+  const ClaudeChatKey({
+    required this.serverId,
+    required this.absolutePath,
+  });
+  final String serverId;
+  final String absolutePath;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ClaudeChatKey &&
+      other.serverId == serverId &&
+      other.absolutePath == absolutePath;
+  @override
+  int get hashCode => Object.hash(serverId, absolutePath);
+}
 
 /// Multi-tab terminal state, keyed by server id.
 final terminalTabsProvider = NotifierProvider.family<TerminalTabsNotifier,

@@ -8,6 +8,7 @@ import '../../shared/widgets/akariyu_card.dart';
 import '../../shared/widgets/status_dot.dart';
 import '../../theme/colors.dart';
 import '../../theme/typography.dart';
+import '../claude/claude_projects_screen.dart';
 import '../files/file_explorer_screen.dart';
 import '../terminal/terminal_screen.dart';
 
@@ -27,7 +28,7 @@ class ServerShell extends ConsumerStatefulWidget {
   ConsumerState<ServerShell> createState() => _ServerShellState();
 }
 
-enum ServerTab { dashboard, files, terminal }
+enum ServerTab { dashboard, claude, files, terminal }
 
 class _ServerShellState extends ConsumerState<ServerShell> {
   late ServerTab _tab;
@@ -48,6 +49,7 @@ class _ServerShellState extends ConsumerState<ServerShell> {
         index: _tab.index,
         children: [
           _DashboardTab(serverId: widget.serverId, onGoTab: _go),
+          ClaudeProjectsScreen(serverId: widget.serverId),
           FileExplorerScreen(serverId: widget.serverId),
           TerminalScreen(serverId: widget.serverId),
         ],
@@ -62,6 +64,11 @@ class _ServerShellState extends ConsumerState<ServerShell> {
             icon: Icon(Icons.dashboard_outlined),
             selectedIcon: Icon(Icons.dashboard),
             label: 'Home',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.auto_awesome_outlined),
+            selectedIcon: Icon(Icons.auto_awesome),
+            label: 'Claude',
           ),
           NavigationDestination(
             icon: Icon(Icons.folder_outlined),
@@ -252,6 +259,8 @@ class _QuickActions extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
+        _tile(Icons.auto_awesome, 'Claude', () => onGoTab(ServerTab.claude)),
+        const SizedBox(width: 12),
         _tile(Icons.folder_open, 'Files', () => onGoTab(ServerTab.files)),
         const SizedBox(width: 12),
         _tile(Icons.terminal, 'Terminal', () => onGoTab(ServerTab.terminal)),
