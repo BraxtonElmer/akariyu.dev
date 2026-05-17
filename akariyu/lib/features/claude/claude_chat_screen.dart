@@ -11,8 +11,10 @@ import '../../core/claude/claude_live_session.dart';
 import '../../core/claude/claude_models.dart';
 import '../../core/providers.dart';
 import '../../shared/widgets/akariyu_button.dart';
+import '../../shared/widgets/akariyu_text_field.dart';
 import '../../theme/colors.dart';
 import '../../theme/typography.dart';
+import 'claude_login_screen.dart';
 
 /// Read + send chat over a Claude Code session. History is sourced from
 /// the on-disk `.jsonl`; live turns are appended by polling the same file
@@ -118,11 +120,172 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
       if (installed && mounted) {
         await _send(overrideText: text);
       }
+    } on ClaudeNotAuthenticatedException {
+      _stopPolling();
+      if (!mounted) return;
+      final authed = await _promptApiKey();
+      if (authed && mounted) {
+        await _send(overrideText: text);
+      }
     } catch (e) {
       _stopPolling();
       if (!mounted) return;
       setState(() => _sendError = e.toString());
     }
+  }
+
+  /// Bottom sheet that offers two ways to authenticate Claude on the
+  /// server. Returns true on success so the caller can retry the send.
+  Future<bool> _promptApiKey() async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AkariyuColors.surfaceElevated,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: AkariyuColors.borderSubtle,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text('Authenticate Claude Code',
+                  style: AkariyuTypography.headlineLarge),
+              const SizedBox(height: 4),
+              Text(
+                'Pick how you want to log in. Both store credentials on '
+                'the server, not on this device.',
+                style: AkariyuTypography.bodySmall,
+              ),
+              const SizedBox(height: 20),
+              _AuthOptionTile(
+                icon: Icons.account_circle_outlined,
+                label: 'Log in with Anthropic account',
+                detail:
+                    'Browser OAuth via `claude /login`. Best for Claude '
+                    'Pro / Max subscribers.',
+                onTap: () => Navigator.pop(ctx, 'oauth'),
+              ),
+              const SizedBox(height: 10),
+              _AuthOptionTile(
+                icon: Icons.vpn_key_outlined,
+                label: 'Paste API key',
+                detail:
+                    'From console.anthropic.com/settings/keys. Saved to '
+                    '~/.claude/akariyu.env (chmod 600).',
+                onTap: () => Navigator.pop(ctx, 'apikey'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (choice == 'apikey') return _promptApiKeyEntry();
+    if (choice == 'oauth') return _runOAuthLogin();
+    return false;
+  }
+
+  Future<bool> _promptApiKeyEntry() async {
+    final ctrl = TextEditingController();
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AkariyuColors.surfaceElevated,
+        title: Text('Paste Anthropic API key',
+            style: AkariyuTypography.titleLarge),
+        content: SizedBox(
+          width: 380,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Get a key at console.anthropic.com/settings/keys. '
+                'Stored on the server in ~/.claude/akariyu.env (chmod 600).',
+                style: AkariyuTypography.bodyMedium,
+              ),
+              const SizedBox(height: 12),
+              InkWell(
+                onTap: () async => Clipboard.setData(const ClipboardData(
+                    text: 'https://console.anthropic.com/settings/keys')),
+                child: Text(
+                  'Tap to copy link',
+                  style: AkariyuTypography.bodySmall.copyWith(
+                    color: AkariyuColors.accent,
+                    decoration: TextDecoration.underline,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: ctrl,
+                autofocus: true,
+                obscureText: true,
+                cursorColor: AkariyuColors.accent,
+                style: AkariyuTypography.mono,
+                decoration: const InputDecoration(hintText: 'sk-ant-…'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text('Save',
+                style: TextStyle(color: AkariyuColors.accent)),
+          ),
+        ],
+      ),
+    );
+    if (saved != true || ctrl.text.trim().isEmpty) {
+      ctrl.dispose();
+      return false;
+    }
+    try {
+      final live = await ref.read(claudeLiveSessionProvider(_liveKey).future);
+      await live.setApiKey(ctrl.text.trim());
+      ctrl.dispose();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('API key saved')),
+        );
+      }
+      return true;
+    } catch (e) {
+      ctrl.dispose();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Save failed: $e')),
+        );
+      }
+      return false;
+    }
+  }
+
+  /// OAuth flow: navigate to a full-screen terminal pre-running
+  /// `claude /login`. The user completes the TUI auth interactively and
+  /// taps "Done" to return — we then retry their pending message.
+  Future<bool> _runOAuthLogin() async {
+    final done = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => ClaudeLoginScreen(serverId: widget.serverId),
+        fullscreenDialog: true,
+      ),
+    );
+    return done == true;
   }
 
   /// Shows an install-claude dialog. Returns true on a successful install.
@@ -381,6 +544,58 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
   }
 }
 
+
+/// One row in the "how do you want to authenticate?" bottom sheet.
+class _AuthOptionTile extends StatelessWidget {
+  const _AuthOptionTile({
+    required this.icon,
+    required this.label,
+    required this.detail,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final String detail;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AkariyuColors.surfaceCard,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: const BorderSide(color: AkariyuColors.borderSubtle),
+      ),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          child: Row(
+            children: [
+              Icon(icon, color: AkariyuColors.accent, size: 22),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(label, style: AkariyuTypography.bodyLarge),
+                    const SizedBox(height: 2),
+                    Text(detail, style: AkariyuTypography.bodySmall),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right,
+                  color: AkariyuColors.textTertiary, size: 18),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Snapshot of an in-flight `npm install -g …` for the install dialog.
 class _InstallProgress {
   const _InstallProgress({
@@ -437,6 +652,20 @@ class _SendConfigSheet extends StatefulWidget {
 class _SendConfigSheetState extends State<_SendConfigSheet> {
   late String _model = widget.initial.model;
   late String _permissionMode = widget.initial.permissionMode;
+  late final _maxTurnsCtrl = TextEditingController(
+    text: widget.initial.maxTurns?.toString() ?? '',
+  );
+  late final _appendCtrl = TextEditingController(
+    text: widget.initial.appendSystemPrompt,
+  );
+  late bool _verbose = widget.initial.verbose;
+
+  @override
+  void dispose() {
+    _maxTurnsCtrl.dispose();
+    _appendCtrl.dispose();
+    super.dispose();
+  }
 
   static const _models = <_Choice>[
     _Choice('default', 'Default', 'Whatever ~/.claude/settings.json says'),
@@ -454,66 +683,107 @@ class _SendConfigSheetState extends State<_SendConfigSheet> {
         'bypassPermissions', 'Bypass', 'Skip every prompt — be careful'),
   ];
 
+  ClaudeSendConfig _build() {
+    final raw = _maxTurnsCtrl.text.trim();
+    final parsed = raw.isEmpty ? null : int.tryParse(raw);
+    return ClaudeSendConfig(
+      model: _model,
+      permissionMode: _permissionMode,
+      maxTurns: parsed,
+      appendSystemPrompt: _appendCtrl.text.trim(),
+      verbose: _verbose,
+    );
+  }
+
+  Widget _sectionLabel(String text) => Text(text,
+      style: AkariyuTypography.labelLarge.copyWith(
+        color: AkariyuColors.textSecondary,
+      ));
+
   @override
   Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: AkariyuColors.borderSubtle,
-                  borderRadius: BorderRadius.circular(2),
+        padding: EdgeInsets.fromLTRB(20, 12, 20, 20 + bottomInset),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: AkariyuColors.borderSubtle,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 16),
-            Text('Send settings', style: AkariyuTypography.headlineLarge),
-            const SizedBox(height: 4),
-            Text(
-              'Applied to every message you send from this device.',
-              style: AkariyuTypography.bodySmall,
-            ),
-            const SizedBox(height: 20),
-            Text('Model',
-                style: AkariyuTypography.labelLarge.copyWith(
-                  color: AkariyuColors.textSecondary,
-                )),
-            const SizedBox(height: 8),
-            _ChoiceList(
-              choices: _models,
-              value: _model,
-              onChanged: (v) => setState(() => _model = v),
-            ),
-            const SizedBox(height: 20),
-            Text('Permission mode',
-                style: AkariyuTypography.labelLarge.copyWith(
-                  color: AkariyuColors.textSecondary,
-                )),
-            const SizedBox(height: 8),
-            _ChoiceList(
-              choices: _modes,
-              value: _permissionMode,
-              onChanged: (v) => setState(() => _permissionMode = v),
-            ),
-            const SizedBox(height: 20),
-            AkariyuButton(
-              label: 'Save',
-              fullWidth: true,
-              onPressed: () => Navigator.of(context).pop(
-                ClaudeSendConfig(
-                  model: _model,
-                  permissionMode: _permissionMode,
-                ),
+              const SizedBox(height: 16),
+              Text('Send settings', style: AkariyuTypography.headlineLarge),
+              const SizedBox(height: 4),
+              Text(
+                'Applied to every message you send from this device.',
+                style: AkariyuTypography.bodySmall,
               ),
-            ),
-          ],
+              const SizedBox(height: 20),
+              _sectionLabel('Model'),
+              const SizedBox(height: 8),
+              _ChoiceList(
+                choices: _models,
+                value: _model,
+                onChanged: (v) => setState(() => _model = v),
+              ),
+              const SizedBox(height: 20),
+              _sectionLabel('Permission mode'),
+              const SizedBox(height: 8),
+              _ChoiceList(
+                choices: _modes,
+                value: _permissionMode,
+                onChanged: (v) => setState(() => _permissionMode = v),
+              ),
+              const SizedBox(height: 20),
+              _sectionLabel('Max turns'),
+              const SizedBox(height: 8),
+              AkariyuTextField(
+                controller: _maxTurnsCtrl,
+                hint: 'unlimited',
+                helper: 'Cap on conversation turns per send. Blank = no cap.',
+                keyboardType: TextInputType.number,
+              ),
+              const SizedBox(height: 20),
+              _sectionLabel('Append to system prompt'),
+              const SizedBox(height: 8),
+              AkariyuTextField(
+                controller: _appendCtrl,
+                hint: 'Extra instructions for Claude',
+                helper: 'Sent via --append-system-prompt every message.',
+                minLines: 2,
+                maxLines: 5,
+              ),
+              const SizedBox(height: 20),
+              SwitchListTile.adaptive(
+                value: _verbose,
+                onChanged: (v) => setState(() => _verbose = v),
+                title:
+                    Text('Verbose', style: AkariyuTypography.bodyLarge),
+                subtitle: Text(
+                  'Pass --verbose to Claude. More noise, more detail.',
+                  style: AkariyuTypography.bodySmall,
+                ),
+                activeThumbColor: AkariyuColors.accent,
+                contentPadding: EdgeInsets.zero,
+              ),
+              const SizedBox(height: 12),
+              AkariyuButton(
+                label: 'Save',
+                fullWidth: true,
+                onPressed: () => Navigator.of(context).pop(_build()),
+              ),
+            ],
+          ),
         ),
       ),
     );

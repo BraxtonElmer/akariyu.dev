@@ -210,6 +210,17 @@ class SftpService {
     }
   }
 
+  /// True if [path] exists on the server (file, directory, symlink, …).
+  /// Implemented via SFTP stat so we don't depend on shell semantics.
+  Future<bool> exists(String path) async {
+    try {
+      await _client.stat(path);
+      return true;
+    } on SftpStatusError {
+      return false;
+    }
+  }
+
   Future<void> mkdir(String path) async {
     try {
       await _client.mkdir(path);
