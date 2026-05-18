@@ -60,6 +60,12 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
   /// send. Render as preview chips above the input.
   final List<_PendingAttachment> _attachments = [];
 
+  /// Prompt the user just sent that hasn't yet shown up in the JSONL.
+  /// We render it as an optimistic user bubble at the end of the chat
+  /// so the message lands in the conversation the moment they tap send,
+  /// not 1–2 seconds later when polling first sees the write.
+  String? _optimisticPrompt;
+
   @override
   void dispose() {
     _pollTimer?.cancel();
@@ -113,8 +119,12 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
       _waiting = true;
       _sendError = null;
       _attachments.clear();
+      _optimisticPrompt = composed;
     });
     if (overrideText == null) _inputController.clear();
+    // Jump the chat to the bottom so the optimistic bubble is visible
+    // even if the user was scrolled up.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
 
     _lastStat = await _safeStat();
     _startPolling();
@@ -438,10 +448,18 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
   /// new JSONL lines land. Stops in [_stopPolling] when the send returns.
   void _startPolling() {
     _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) async {
+    // Faster than the JSONL flush cadence — Claude appends a block per
+    // turn (thinking, tool_use, tool_result, …) and we want each one in
+    // the activity strip ASAP.
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 900), (_) async {
       final stat = await _safeStat();
       if (stat == null || stat == _lastStat) return;
       _lastStat = stat;
+      // First JSONL change = Claude has logged at least the user
+      // message, so the optimistic bubble is now redundant.
+      if (_optimisticPrompt != null && mounted) {
+        setState(() => _optimisticPrompt = null);
+      }
       ref.invalidate(claudeChatHistoryProvider(_chatKey));
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
     });
@@ -450,7 +468,13 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
   void _stopPolling() {
     _pollTimer?.cancel();
     _pollTimer = null;
-    if (mounted) setState(() => _waiting = false);
+    if (mounted) {
+      setState(() {
+        _waiting = false;
+        // Send returned — by now the real user message is in JSONL.
+        _optimisticPrompt = null;
+      });
+    }
   }
 
   Future<ClaudeSessionStat?> _safeStat() async {
@@ -710,6 +734,19 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
                 .where((m) =>
                     m.type != 'summary' && m.blocks.isNotEmpty)
                 .toList();
+            // Append the in-flight user prompt as an optimistic bubble
+            // until the real one shows up in the JSONL on the next
+            // poll tick.
+            if (_optimisticPrompt != null) {
+              visible.add(ClaudeMessage(
+                uuid: '__akariyu_optimistic__',
+                parentUuid: null,
+                role: 'user',
+                type: 'user',
+                timestamp: DateTime.now(),
+                blocks: [ClaudeTextBlock(_optimisticPrompt!)],
+              ));
+            }
             if (!_autoScrolledOnce && visible.isNotEmpty) {
               _autoScrolledOnce = true;
               WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -763,6 +800,8 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
                       busy: _waiting,
                       onSend: _send,
                       onAttach: _openAttachSheet,
+                      activity:
+                          _waiting ? _deriveActivity(visible) : null,
                     ),
                   ],
                 ),
@@ -969,6 +1008,129 @@ class _PendingAttachment {
   final String displayName;
   final bool isImage;
   final Uint8List? thumbnail;
+}
+
+/// One-line summary of what Claude is doing _right now_. Shown above
+/// the input bar while a send is in flight.
+class _ActivitySummary {
+  const _ActivitySummary({required this.icon, required this.text});
+  final IconData icon;
+  final String text;
+}
+
+const _activityDefault = _ActivitySummary(
+  icon: Icons.psychology_outlined,
+  text: 'Thinking…',
+);
+
+/// Walk the parsed history backward and report the most-recent block
+/// that says something interesting about Claude's current activity.
+_ActivitySummary _deriveActivity(List<ClaudeMessage> messages) {
+  if (messages.isEmpty) return _activityDefault;
+  // Scan from newest to older — usually the last message is the
+  // assistant turn in progress.
+  for (final msg in messages.reversed) {
+    if (msg.isAssistant) {
+      for (final block in msg.blocks.reversed) {
+        if (block is ClaudeToolUseBlock) {
+          return _summarizeToolUse(block.name, block.input);
+        }
+        if (block is ClaudeTextBlock) {
+          return const _ActivitySummary(
+            icon: Icons.edit_outlined,
+            text: 'Writing response…',
+          );
+        }
+        if (block is ClaudeThinkingBlock) {
+          return const _ActivitySummary(
+            icon: Icons.psychology_outlined,
+            text: 'Thinking…',
+          );
+        }
+      }
+      break;
+    }
+    if (msg.isUser) {
+      // Most recent thing is a tool_result — Claude just got data
+      // back and is about to react.
+      for (final block in msg.blocks.reversed) {
+        if (block is ClaudeToolResultBlock) {
+          return const _ActivitySummary(
+            icon: Icons.outbound_outlined,
+            text: 'Processing tool result…',
+          );
+        }
+      }
+      break;
+    }
+  }
+  return _activityDefault;
+}
+
+_ActivitySummary _summarizeToolUse(String name, Map<String, dynamic> input) {
+  String base(String s) => s.split('/').last;
+  switch (name) {
+    case 'Bash':
+      final cmd = (input['command'] ?? '').toString().split('\n').first;
+      return _ActivitySummary(
+        icon: Icons.terminal_outlined,
+        text: 'Bash: $cmd',
+      );
+    case 'Read':
+      return _ActivitySummary(
+        icon: Icons.menu_book_outlined,
+        text: 'Read: ${base((input['file_path'] ?? '').toString())}',
+      );
+    case 'Edit':
+    case 'MultiEdit':
+      return _ActivitySummary(
+        icon: Icons.edit_note_outlined,
+        text: 'Edit: ${base((input['file_path'] ?? '').toString())}',
+      );
+    case 'Write':
+      return _ActivitySummary(
+        icon: Icons.note_add_outlined,
+        text: 'Write: ${base((input['file_path'] ?? '').toString())}',
+      );
+    case 'Glob':
+      return _ActivitySummary(
+        icon: Icons.search,
+        text: 'Glob: ${(input['pattern'] ?? '').toString()}',
+      );
+    case 'Grep':
+      final pat = (input['pattern'] ?? '').toString();
+      final path = (input['path'] ?? input['glob'] ?? '').toString();
+      return _ActivitySummary(
+        icon: Icons.search,
+        text: path.isEmpty ? 'Grep: $pat' : 'Grep: $pat in ${base(path)}',
+      );
+    case 'TodoWrite':
+      return const _ActivitySummary(
+        icon: Icons.checklist_outlined,
+        text: 'Updating todos',
+      );
+    case 'WebFetch':
+      return _ActivitySummary(
+        icon: Icons.public_outlined,
+        text: 'Fetch: ${(input['url'] ?? 'URL').toString()}',
+      );
+    case 'WebSearch':
+      return _ActivitySummary(
+        icon: Icons.travel_explore_outlined,
+        text: 'Search: ${(input['query'] ?? '').toString()}',
+      );
+    case 'Task':
+    case 'Agent':
+      return _ActivitySummary(
+        icon: Icons.smart_toy_outlined,
+        text: 'Subagent: ${(input['description'] ?? name).toString()}',
+      );
+    default:
+      return _ActivitySummary(
+        icon: Icons.build_circle_outlined,
+        text: 'Tool: $name',
+      );
+  }
 }
 
 bool _looksLikeImage(String path) {
@@ -1383,6 +1545,7 @@ class _InputBar extends StatelessWidget {
     required this.busy,
     required this.onSend,
     required this.onAttach,
+    this.activity,
   });
 
   final TextEditingController controller;
@@ -1390,6 +1553,7 @@ class _InputBar extends StatelessWidget {
   final bool busy;
   final VoidCallback onSend;
   final VoidCallback onAttach;
+  final _ActivitySummary? activity;
 
   @override
   Widget build(BuildContext context) {
@@ -1402,7 +1566,8 @@ class _InputBar extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (busy) const _WorkingChip(),
+          if (busy)
+            _WorkingChip(activity: activity ?? _activityDefault),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
@@ -1514,7 +1679,8 @@ class _SendButton extends StatelessWidget {
 }
 
 class _WorkingChip extends StatelessWidget {
-  const _WorkingChip();
+  const _WorkingChip({required this.activity});
+  final _ActivitySummary activity;
 
   @override
   Widget build(BuildContext context) {
@@ -1524,7 +1690,7 @@ class _WorkingChip extends StatelessWidget {
         alignment: Alignment.centerLeft,
         child: Container(
           padding:
-              const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
           decoration: BoxDecoration(
             color: AkariyuColors.surfaceCard,
             borderRadius: BorderRadius.circular(20),
@@ -1541,11 +1707,21 @@ class _WorkingChip extends StatelessWidget {
                   color: AkariyuColors.accent,
                 ),
               ),
-              const SizedBox(width: 8),
-              Text('Claude is working…',
+              const SizedBox(width: 10),
+              Icon(activity.icon, size: 12, color: AkariyuColors.accent),
+              const SizedBox(width: 6),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 240),
+                child: Text(
+                  activity.text,
                   style: AkariyuTypography.labelSmall.copyWith(
-                    color: AkariyuColors.textSecondary,
-                  )),
+                    color: AkariyuColors.textPrimary,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
+                ),
+              ),
             ],
           ),
         ),

@@ -291,25 +291,47 @@ class ClaudeLiveSession {
     await sftp.writeText('$dir/settings.json', body);
   }
 
-  /// Upload [bytes] into `~/.claude/akariyu-uploads/<ts>-<safeName>` on
-  /// the server and return the absolute path. The chat input layer turns
-  /// that path into an `@<path>` mention, which Claude Code expands
-  /// natively as a file reference.
+  /// Server-side absolute path of the upload directory, resolved lazily
+  /// once per session (cheap SFTP stat). Set as soon as either an
+  /// upload happens OR [_ensureUploadBaseProbed] discovers a pre-existing
+  /// `~/.claude/akariyu-uploads/` from a previous app launch.
+  String? _uploadBase;
+
+  /// Resolve [`~/.claude/akariyu-uploads/`] and cache it in
+  /// [_uploadBase] **iff** it already exists. Cheap to call repeatedly
+  /// — short-circuits once cached.
+  Future<void> _ensureUploadBaseProbed() async {
+    if (_uploadBase != null) return;
+    try {
+      final home = await sftp.resolveAbsolute('.');
+      final candidate = '$home/.claude/akariyu-uploads';
+      if (await sftp.exists(candidate)) {
+        _uploadBase = candidate;
+      }
+    } catch (_) {
+      // best-effort
+    }
+  }
+
+  /// Upload [bytes] into `~/.claude/akariyu-uploads/<ts>-<safe>` and
+  /// return the absolute path. The uploads dir lives outside any project
+  /// cwd by design — every send auto-injects a `--add-dir` for it so
+  /// Claude is allowed to read attachments without ever touching the
+  /// user's project tree.
   Future<String> uploadAttachment({
     required Uint8List bytes,
     required String fileName,
   }) async {
     final home = await sftp.resolveAbsolute('.');
-    final dir = '$home/.claude/akariyu-uploads';
-    if (!await sftp.exists(dir)) {
-      // mkdir -p in two steps if .claude itself is missing.
+    final base = '$home/.claude/akariyu-uploads';
+    if (!await sftp.exists(base)) {
       if (!await sftp.exists('$home/.claude')) {
         await sftp.mkdir('$home/.claude');
       }
-      await sftp.mkdir(dir);
+      await sftp.mkdir(base);
     }
-    // Strip path separators / weird chars from the basename so we don't
-    // accidentally create nested dirs from a user-supplied filename.
+    _uploadBase = base;
+
     final safe = fileName
         .split('/')
         .last
@@ -317,7 +339,7 @@ class ClaudeLiveSession {
         .last
         .replaceAll(RegExp(r'[^A-Za-z0-9._-]+'), '_');
     final stamp = DateTime.now().millisecondsSinceEpoch;
-    final path = '$dir/$stamp-$safe';
+    final path = '$base/$stamp-$safe';
     await sftp.writeBytes(path, bytes);
     _log('uploadAttachment: $path (${bytes.length} bytes)');
     return path;
@@ -380,6 +402,11 @@ class ClaudeLiveSession {
       throw const ClaudeNotInstalledException();
     }
 
+    // Catch up on any uploads from a previous app launch, so the
+    // auto --add-dir below still kicks in even before the user has
+    // uploaded anything *this* session.
+    await _ensureUploadBaseProbed();
+
     // Stage the prompt in a tmp file so we don't need to shell-escape
     // multi-line / special-character content.
     final stamp = DateTime.now().millisecondsSinceEpoch;
@@ -388,6 +415,12 @@ class ClaudeLiveSession {
 
     final cdPart = cwd.isEmpty ? '' : 'cd ${_sh(cwd)} && ';
     final flags = StringBuffer();
+    // Always trust the uploads dir so `@<uploaded-file>` attachments
+    // resolve without Claude prompting for permission — it's outside
+    // the project cwd by design.
+    if (_uploadBase != null) {
+      flags.write('--add-dir ${_sh(_uploadBase!)} ');
+    }
     if (config.model != 'default') {
       flags.write('--model ${_sh(config.model)} ');
     }
