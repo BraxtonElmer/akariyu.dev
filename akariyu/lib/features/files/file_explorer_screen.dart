@@ -13,15 +13,22 @@ import '../../theme/typography.dart';
 
 /// SFTP-backed file explorer for a single server. Starts at the user's home
 /// directory unless [initialPath] is supplied.
+///
+/// When [pickerMode] is true the screen runs as a one-shot picker:
+/// tapping a file pops the screen with the absolute path; tapping a
+/// folder still drills in. The editor / context menu are disabled in
+/// this mode.
 class FileExplorerScreen extends ConsumerStatefulWidget {
   const FileExplorerScreen({
     super.key,
     required this.serverId,
     this.initialPath,
+    this.pickerMode = false,
   });
 
   final String serverId;
   final String? initialPath;
+  final bool pickerMode;
 
   @override
   ConsumerState<FileExplorerScreen> createState() => _FileExplorerScreenState();
@@ -97,10 +104,17 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
   }
 
   Widget _buildScaffold() {
+    final isPicker = widget.pickerMode;
     return Scaffold(
       backgroundColor: AkariyuColors.backgroundBase,
       appBar: AppBar(
-        title: const Text('Files'),
+        title: Text(isPicker ? 'Pick a file' : 'Files'),
+        leading: isPicker
+            ? IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => Navigator.of(context).pop(),
+              )
+            : null,
         actions: [
           IconButton(
             tooltip: _showHidden ? 'Hide dotfiles' : 'Show dotfiles',
@@ -109,25 +123,26 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
                 : Icons.visibility_off_outlined),
             onPressed: () => setState(() => _showHidden = !_showHidden),
           ),
-          PopupMenuButton<String>(
-            color: AkariyuColors.surfaceElevated,
-            icon: const Icon(Icons.add),
-            onSelected: (v) {
-              if (_path == null) return;
-              switch (v) {
-                case 'newFile':
-                  _promptCreate(isDirectory: false);
-                  break;
-                case 'newDir':
-                  _promptCreate(isDirectory: true);
-                  break;
-              }
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'newFile', child: Text('New file')),
-              PopupMenuItem(value: 'newDir', child: Text('New folder')),
-            ],
-          ),
+          if (!isPicker)
+            PopupMenuButton<String>(
+              color: AkariyuColors.surfaceElevated,
+              icon: const Icon(Icons.add),
+              onSelected: (v) {
+                if (_path == null) return;
+                switch (v) {
+                  case 'newFile':
+                    _promptCreate(isDirectory: false);
+                    break;
+                  case 'newDir':
+                    _promptCreate(isDirectory: true);
+                    break;
+                }
+              },
+              itemBuilder: (_) => const [
+                PopupMenuItem(value: 'newFile', child: Text('New file')),
+                PopupMenuItem(value: 'newDir', child: Text('New folder')),
+              ],
+            ),
         ],
       ),
       body: SafeArea(
@@ -158,6 +173,7 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
                       onTapDirectory: _navigateTo,
                       onRefresh: _refresh,
                       onEntryAction: _onEntryAction,
+                      pickerMode: isPicker,
                     ),
                   ),
                 ],
@@ -172,9 +188,13 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
         if (entry.isDirectory) {
           _navigateTo(entry.path);
         } else if (entry.isFile) {
-          await context.push(
-            '/server/${widget.serverId}/files/edit?path=${Uri.encodeQueryComponent(entry.path)}',
-          );
+          if (widget.pickerMode) {
+            Navigator.of(context).pop(entry.path);
+          } else {
+            await context.push(
+              '/server/${widget.serverId}/files/edit?path=${Uri.encodeQueryComponent(entry.path)}',
+            );
+          }
         }
         break;
       case _EntryAction.copyPath:
@@ -379,6 +399,7 @@ class _Listing extends ConsumerWidget {
     required this.onTapDirectory,
     required this.onRefresh,
     required this.onEntryAction,
+    this.pickerMode = false,
   });
 
   final String serverId;
@@ -388,6 +409,7 @@ class _Listing extends ConsumerWidget {
   final ValueChanged<String> onTapDirectory;
   final Future<void> Function() onRefresh;
   final Future<void> Function(_EntryAction, FsEntry) onEntryAction;
+  final bool pickerMode;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -427,6 +449,7 @@ class _Listing extends ConsumerWidget {
             itemBuilder: (_, i) => _EntryTile(
               entry: visible[i],
               onAction: onEntryAction,
+              pickerMode: pickerMode,
             ),
           );
         },
@@ -436,9 +459,17 @@ class _Listing extends ConsumerWidget {
 }
 
 class _EntryTile extends StatelessWidget {
-  const _EntryTile({required this.entry, required this.onAction});
+  const _EntryTile({
+    required this.entry,
+    required this.onAction,
+    this.pickerMode = false,
+  });
   final FsEntry entry;
   final Future<void> Function(_EntryAction, FsEntry) onAction;
+
+  /// In picker mode we suppress the long-press bottom sheet and the
+  /// trailing `⋯` so the affordance is unambiguous: tap = pick.
+  final bool pickerMode;
 
   IconData _iconFor(FsEntry e) {
     if (e.isDirectory) return Icons.folder_outlined;
@@ -503,7 +534,7 @@ class _EntryTile extends StatelessWidget {
     final modified = entry.modifiedAt;
     return InkWell(
       onTap: () => onAction(_EntryAction.open, entry),
-      onLongPress: () => _showActions(context),
+      onLongPress: pickerMode ? null : () => _showActions(context),
       borderRadius: BorderRadius.circular(10),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -541,10 +572,12 @@ class _EntryTile extends StatelessWidget {
                 ],
               ),
             ),
-            IconButton(
-              icon: Icon(Icons.more_horiz, color: AkariyuColors.textTertiary),
-              onPressed: () => _showActions(context),
-            ),
+            if (!pickerMode)
+              IconButton(
+                icon:
+                    Icon(Icons.more_horiz, color: AkariyuColors.textTertiary),
+                onPressed: () => _showActions(context),
+              ),
           ],
         ),
       ),

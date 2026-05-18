@@ -16,6 +16,7 @@ import '../../shared/widgets/akariyu_button.dart';
 import '../../shared/widgets/akariyu_text_field.dart';
 import '../../theme/colors.dart';
 import '../../theme/typography.dart';
+import '../files/file_explorer_screen.dart';
 import 'claude_login_screen.dart';
 
 /// Read + send chat over a Claude Code session. History is sourced from
@@ -55,6 +56,10 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
   Timer? _pollTimer;
   ClaudeSessionStat? _lastStat;
 
+  /// Files queued to be prepended as `@<path>` mentions in the next
+  /// send. Render as preview chips above the input.
+  final List<_PendingAttachment> _attachments = [];
+
   @override
   void dispose() {
     _pollTimer?.cancel();
@@ -90,12 +95,24 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
   }
 
   Future<void> _send({String? overrideText}) async {
-    final text = (overrideText ?? _inputController.text).trim();
-    if (text.isEmpty || _waiting) return;
+    final body = (overrideText ?? _inputController.text).trim();
+    // Send is gated on either text OR attachments — image-only sends
+    // are valid.
+    if (body.isEmpty && _attachments.isEmpty || _waiting) return;
     HapticFeedback.mediumImpact();
+
+    // Build the final prompt: `@/path/one @/path/two\n<body>`.
+    // Claude Code's CLI expands @-references natively (file contents,
+    // images, …) so this is all we have to do.
+    final mentions = _attachments.map((a) => '@${a.path}').join(' ');
+    final composed = mentions.isEmpty
+        ? body
+        : (body.isEmpty ? mentions : '$mentions\n\n$body');
+
     setState(() {
       _waiting = true;
       _sendError = null;
+      _attachments.clear();
     });
     if (overrideText == null) _inputController.clear();
 
@@ -106,7 +123,7 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
       final live = await ref.read(claudeLiveSessionProvider(_liveKey).future);
       final cfg = ref.read(claudeSendConfigProvider).valueOrNull ??
           const ClaudeSendConfig();
-      final result = await live.sendMessage(text, config: cfg);
+      final result = await live.sendMessage(composed, config: cfg);
       ref.invalidate(claudeChatHistoryProvider(_chatKey));
       _stopPolling();
       if (!mounted) return;
@@ -117,17 +134,18 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
     } on ClaudeNotInstalledException {
       _stopPolling();
       if (!mounted) return;
-      // Offer to install, then retry the same message.
+      // Offer to install, then retry with the composed prompt (mentions
+      // + body) so attachments aren't lost.
       final installed = await _promptInstall();
       if (installed && mounted) {
-        await _send(overrideText: text);
+        await _send(overrideText: composed);
       }
     } on ClaudeNotAuthenticatedException {
       _stopPolling();
       if (!mounted) return;
       final authed = await _promptApiKey();
       if (authed && mounted) {
-        await _send(overrideText: text);
+        await _send(overrideText: composed);
       }
     } catch (e) {
       _stopPolling();
@@ -409,7 +427,10 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
         ),
       ),
     );
-    controller.dispose();
+    // Defer the notifier disposal a frame past dialog dismissal — the
+    // ValueListenableBuilder needs to unsubscribe BEFORE we tear the
+    // notifier down, otherwise Flutter trips `_dependents.isEmpty`.
+    WidgetsBinding.instance.addPostFrameCallback((_) => controller.dispose());
     return ok == true;
   }
 
@@ -566,52 +587,26 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
     }
   }
 
+  /// Push the file explorer in picker mode, starting from the project's
+  /// cwd if known. Tapping a file pops back with its absolute path.
   Future<void> _attachFromServerPath() async {
-    final ctrl = TextEditingController();
-    final path = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AkariyuColors.surfaceElevated,
-        title: Text('Reference server file',
-            style: AkariyuTypography.titleLarge),
-        content: SizedBox(
-          width: 360,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Absolute path. Tip: long-press a file in the Files '
-                'tab → Copy path.',
-                style: AkariyuTypography.bodySmall,
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: ctrl,
-                autofocus: true,
-                style: AkariyuTypography.mono,
-                cursorColor: AkariyuColors.accent,
-                decoration: const InputDecoration(hintText: '/home/me/foo.md'),
-              ),
-            ],
-          ),
+    final picked = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (_) => FileExplorerScreen(
+          serverId: widget.serverId,
+          initialPath: widget.cwd.isEmpty ? null : widget.cwd,
+          pickerMode: true,
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-            child: Text('Attach',
-                style: TextStyle(color: AkariyuColors.accent)),
-          ),
-        ],
+        fullscreenDialog: true,
       ),
     );
-    ctrl.dispose();
-    if (path == null || path.isEmpty) return;
-    _insertMention(path);
+    if (picked == null || picked.isEmpty || !mounted) return;
+    setState(() => _attachments.add(_PendingAttachment(
+          path: picked,
+          displayName: picked.split('/').last,
+          isImage: _looksLikeImage(picked),
+          thumbnail: null,
+        )));
   }
 
   Future<void> _uploadAndMention({
@@ -625,10 +620,19 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
       final remotePath =
           await live.uploadAttachment(bytes: bytes, fileName: fileName);
       overlay.close();
-      _insertMention(remotePath);
-      messenger.showSnackBar(
-        SnackBar(content: Text('Attached $fileName')),
-      );
+      if (!mounted) return;
+      final isImage = _looksLikeImage(fileName);
+      setState(() => _attachments.add(_PendingAttachment(
+            path: remotePath,
+            displayName: fileName,
+            isImage: isImage,
+            // Keep a thumbnail-sized copy in memory only for images so
+            // we can render a chip preview; larger files would balloon
+            // the heap.
+            thumbnail: (isImage && bytes.length < 4 * 1024 * 1024)
+                ? bytes
+                : null,
+          )));
     } catch (e) {
       overlay.close();
       messenger.showSnackBar(SnackBar(content: Text('Upload failed: $e')));
@@ -656,26 +660,8 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
     ));
   }
 
-  /// Inject `@<path>` at the input field's cursor. Adds a leading/
-  /// trailing space so it doesn't collide with surrounding text.
-  void _insertMention(String path) {
-    final controller = _inputController;
-    final sel = controller.selection;
-    final text = controller.text;
-    final mention = '@$path ';
-    final start = sel.isValid ? sel.start : text.length;
-    final end = sel.isValid ? sel.end : text.length;
-    final needsSpaceBefore =
-        start > 0 && !RegExp(r'\s').hasMatch(text[start - 1]);
-    final inserted = (needsSpaceBefore ? ' ' : '') + mention;
-    final newText = text.replaceRange(start, end, inserted);
-    controller.value = TextEditingValue(
-      text: newText,
-      selection: TextSelection.collapsed(
-        offset: start + inserted.length,
-      ),
-    );
-    _inputFocus.requestFocus();
+  void _removeAttachment(_PendingAttachment a) {
+    setState(() => _attachments.remove(a));
   }
 
   Future<void> _openSettings() async {
@@ -747,14 +733,29 @@ class _ClaudeChatScreenState extends ConsumerState<ClaudeChatScreen> {
                               controller: _scrollController,
                               padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
                               itemCount: visible.length,
-                              itemBuilder: (_, i) =>
-                                  _MessageBubble(visible[i]),
+                              // Caching ~3 screens of bubbles keeps
+                              // scroll jank away on long sessions.
+                              cacheExtent: 1200,
+                              // Each bubble re-renders markdown +
+                              // collapsible tool cards; isolate them in
+                              // their own layer so unrelated state
+                              // (polling tick, input typing) doesn't
+                              // force the whole list to repaint.
+                              itemBuilder: (_, i) => RepaintBoundary(
+                                key: ValueKey(visible[i].uuid ?? i),
+                                child: _MessageBubble(visible[i]),
+                              ),
                             ),
                     ),
                     if (_sendError != null)
                       _SendErrorBanner(
                         message: _sendError!,
                         onDismiss: () => setState(() => _sendError = null),
+                      ),
+                    if (_attachments.isNotEmpty)
+                      _AttachmentStrip(
+                        attachments: _attachments,
+                        onRemove: _removeAttachment,
                       ),
                     _InputBar(
                       controller: _inputController,
@@ -835,6 +836,152 @@ class _AuthOptionTile extends StatelessWidget {
 }
 
 /// Snapshot of an in-flight `npm install -g …` for the install dialog.
+/// Horizontal strip of pending-attachment chips, shown above the input
+/// bar. Each chip is a thumbnail (for images) or an icon + filename
+/// (for everything else), with a small `×` to remove.
+class _AttachmentStrip extends StatelessWidget {
+  const _AttachmentStrip({
+    required this.attachments,
+    required this.onRemove,
+  });
+
+  final List<_PendingAttachment> attachments;
+  final ValueChanged<_PendingAttachment> onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 76,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+        itemCount: attachments.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
+        itemBuilder: (_, i) => _AttachmentChip(
+          attachment: attachments[i],
+          onRemove: () => onRemove(attachments[i]),
+        ),
+      ),
+    );
+  }
+}
+
+class _AttachmentChip extends StatelessWidget {
+  const _AttachmentChip({required this.attachment, required this.onRemove});
+
+  final _PendingAttachment attachment;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final a = attachment;
+    return RepaintBoundary(
+      child: SizedBox(
+        width: 60,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Container(
+              width: 60,
+              height: 60,
+              decoration: BoxDecoration(
+                color: AkariyuColors.surfaceCard,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AkariyuColors.borderSubtle),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: a.isImage && a.thumbnail != null
+                  ? Image.memory(a.thumbnail!,
+                      fit: BoxFit.cover,
+                      gaplessPlayback: true,
+                      filterQuality: FilterQuality.low)
+                  : Center(
+                      child: Icon(
+                        a.isImage
+                            ? Icons.image_outlined
+                            : Icons.insert_drive_file_outlined,
+                        size: 22,
+                        color: AkariyuColors.textSecondary,
+                      ),
+                    ),
+            ),
+            Positioned(
+              right: -6,
+              top: -6,
+              child: Material(
+                color: AkariyuColors.backgroundBase,
+                shape: const CircleBorder(
+                  side: BorderSide(color: AkariyuColors.borderSubtle),
+                ),
+                child: InkWell(
+                  onTap: onRemove,
+                  customBorder: const CircleBorder(),
+                  child: const SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: Icon(Icons.close,
+                        size: 12, color: AkariyuColors.textSecondary),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              left: 2,
+              right: 2,
+              bottom: 2,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.55),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  a.displayName,
+                  style: AkariyuTypography.labelSmall.copyWith(
+                    color: AkariyuColors.textPrimary,
+                    fontSize: 9,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A file queued for prepending as `@<path>` in the next send. Rendered
+/// as a chip above the input bar — image attachments carry a thumbnail
+/// so we can show a real preview.
+class _PendingAttachment {
+  const _PendingAttachment({
+    required this.path,
+    required this.displayName,
+    required this.isImage,
+    required this.thumbnail,
+  });
+
+  final String path;
+  final String displayName;
+  final bool isImage;
+  final Uint8List? thumbnail;
+}
+
+bool _looksLikeImage(String path) {
+  final ext = path.toLowerCase();
+  return ext.endsWith('.png') ||
+      ext.endsWith('.jpg') ||
+      ext.endsWith('.jpeg') ||
+      ext.endsWith('.gif') ||
+      ext.endsWith('.webp') ||
+      ext.endsWith('.bmp') ||
+      ext.endsWith('.heic');
+}
+
 class _InstallProgress {
   const _InstallProgress({
     required this.running,
